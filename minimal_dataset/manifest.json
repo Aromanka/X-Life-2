@@ -1,0 +1,14 @@
+{
+  "participants": 3,
+  "observed_meals": 2,
+  "observed_exercise_events": 2,
+  "nocturnal_windows": 2,
+  "rule_positive_nights": 1,
+  "rule_negative_nights": 1,
+  "images": {
+    "meal_01_a.jpg": "672dffd950c8dbca4b3d59d9beff4898aa8f30cb42c8b187f3d6010865bfcc5a",
+    "meal_01_b.jpg": "644536bcfbf18571dcf2e248b04348e6413cb2e82df096e082d79c7dca3c9d36",
+    "meal_02_a.jpg": "8c5902539e1909e93afd5cb05299f143f0358be15a05457b9a8fde58f4e038c3",
+    "meal_02_b.jpg": "57153b7293cbbe88774e24c543a5e8182eae2bdf26c9ef79f785415656c08dd1"
+  }
+}
