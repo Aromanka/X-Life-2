@@ -101,4 +101,7 @@ def get_CONDITION_RESTRICTIONS():
     }
 }
 
-ENABLE_RULE_BASED_CHECKS = False
+# Deterministic physiological constraints are part of the safety gate.  Keep
+# them enabled by default so a semantic-model outage cannot silently bypass
+# hard thresholds.
+ENABLE_RULE_BASED_CHECKS = True

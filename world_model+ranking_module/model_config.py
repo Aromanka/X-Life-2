@@ -10,15 +10,38 @@ LANGUAGE_MODELS = {
         'hidden_size': 768,
         'description': 'BERT base Chinese model, suitable for general Chinese text processing'
     },
+    # The manuscript uses the generative Qwen3-8B encoder for exercise and
+    # physiological text features.  Keep the older embedding entry as an
+    # explicit legacy option for backwards-compatible checkpoints.
+    'qwen3-8b': {
+        'name': 'Qwen/Qwen3-8B',
+        'hidden_size': 4096,
+        'description': 'Qwen3 8B language model used by the manuscript'
+    },
+    'qwen-7b': {
+        'name': 'Qwen/Qwen-7B',
+        'hidden_size': 4096,
+        'description': 'Legacy Qwen language model configuration'
+    },
     'qwen3-embedding-8b': {
         'name': 'Qwen/Qwen3-Embedding-8B',
+        'hidden_size': 4096,
+        'description': 'Legacy Qwen3 embedding model for older checkpoints'
+    },
+    'qwen3-embedding-0.6b': {
+        'name': 'Qwen/Qwen3-Embedding-0.6B',
         'hidden_size': 1024,
-        'description': 'Qwen3 8B embedding model, specialized for text embedding'
+        'description': 'Lightweight legacy embedding model for local smoke tests'
     }
 }
 
 # Available vision-language model configurations
 VISION_MODELS = {
+    'qwen2.5-vl-72b-instruct': {
+        'name': 'Qwen/Qwen2.5-VL-72B-Instruct',
+        'hidden_size': 8192,
+        'description': 'Qwen2.5-VL-72B-Instruct diet image and text encoder from the manuscript'
+    },
     'qwen3-vl-embedding-8b': {
         'name': 'Qwen/Qwen3-VL-Embedding-8B',
         'hidden_size': 1024,
@@ -32,8 +55,8 @@ VISION_MODELS = {
 }
 
 # Default model configurations
-DEFAULT_TEXT_MODEL = 'qwen3-embedding-8b'  # Default text model
-DEFAULT_VISION_MODEL = 'qwen3-embedding-8b'  # Default vision model
+DEFAULT_TEXT_MODEL = 'qwen3-8b'  # Manuscript exercise/physiology text encoder
+DEFAULT_VISION_MODEL = 'qwen2.5-vl-72b-instruct'  # Manuscript diet VLM
 
 # Model parameter configurations
 MODEL_CONFIGS = {
@@ -53,15 +76,7 @@ MODEL_CONFIGS = {
         'cgm_dim_feedforward': 1024,
         'dropout': 0.1
     },
-    'qwen3-embedding-0.6b': {
-        'text_hidden_dim': 256,
-        'cgm_d_model': 128,
-        'cgm_nhead': 4,
-        'cgm_num_layers': 2,
-        'cgm_dim_feedforward': 512,
-        'dropout': 0.1
-    },  
-    'qwen3-embedding-0.6b': {
+    'qwen3-8b': {
         'text_hidden_dim': 256,
         'cgm_d_model': 128,
         'cgm_nhead': 4,
@@ -70,6 +85,15 @@ MODEL_CONFIGS = {
         'dropout': 0.1
     },
     'qwen3-embedding-8b': {
+        'text_hidden_dim': 256,
+        'cgm_d_model': 128,
+        'cgm_nhead': 4,
+        'cgm_num_layers': 2,
+        'cgm_dim_feedforward': 512,
+        'dropout': 0.1
+    },
+    # Backwards-compatible alias used by the small CNN-only demonstration.
+    'qwen3-embedding-0.6b': {
         'text_hidden_dim': 256,
         'cgm_d_model': 128,
         'cgm_nhead': 4,
@@ -97,7 +121,12 @@ TRAINING_CONFIGS = {
         'save_interval': 5,
         'use_image_features': True,
         'image_size': (224, 224),
-        'gradient_accumulation_steps': 4
+        'gradient_accumulation_steps': 4,
+        'training_phase': 'world_model',
+        'freeze_action_encoders': True,
+        'preference_beta': 0.1,
+        'split_seeds': [42, 43, 44, 45, 46],
+        'split_index': 0
     },
     'debug': {
         'model_key': DEFAULT_TEXT_MODEL,
@@ -115,7 +144,12 @@ TRAINING_CONFIGS = {
         'save_interval': 1,
         'use_image_features': True,
         'image_size': (224, 224),
-        'gradient_accumulation_steps': 1
+        'gradient_accumulation_steps': 1,
+        'training_phase': 'world_model',
+        'freeze_action_encoders': True,
+        'preference_beta': 0.1,
+        'split_seeds': [42, 43, 44, 45, 46],
+        'split_index': 0
     },
     'production': {
         'model_key': DEFAULT_TEXT_MODEL,
@@ -133,10 +167,15 @@ TRAINING_CONFIGS = {
         'save_interval': 10,
         'use_image_features': True,
         'image_size': (224, 224),
-        'gradient_accumulation_steps': 4
+        'gradient_accumulation_steps': 4,
+        'training_phase': 'world_model',
+        'freeze_action_encoders': True,
+        'preference_beta': 0.1,
+        'split_seeds': [42, 43, 44, 45, 46],
+        'split_index': 0
     },
     'small_model': {
-        'model_key': 'qwen-0.5b',
+        'model_key': 'qwen3-embedding-0.6b',
         'vision_model_key': 'cnn-backup',
         'model_name': 'CGM Prediction with Small Models',
         'batch_size': 8,
@@ -151,7 +190,12 @@ TRAINING_CONFIGS = {
         'save_interval': 5,
         'use_image_features': True,
         'image_size': (224, 224),
-        'gradient_accumulation_steps': 4
+        'gradient_accumulation_steps': 4,
+        'training_phase': 'encoder_pretraining',
+        'freeze_action_encoders': False,
+        'preference_beta': 0.1,
+        'split_seeds': [42, 43, 44, 45, 46],
+        'split_index': 0
     },
     'cnn_only': {
         'model_key': 'qwen3-embedding-0.6b',
@@ -169,7 +213,12 @@ TRAINING_CONFIGS = {
         'save_interval': 5,
         'use_image_features': True,
         'image_size': (224, 224),
-        'gradient_accumulation_steps': 4
+        'gradient_accumulation_steps': 4,
+        'training_phase': 'world_model',
+        'freeze_action_encoders': True,
+        'preference_beta': 0.1,
+        'split_seeds': [42, 43, 44, 45, 46],
+        'split_index': 0
     }
 }
 
@@ -182,6 +231,10 @@ def get_model_config(model_key=None):
         raise ValueError(f"Unknown text model: {model_key}, available models: {list(LANGUAGE_MODELS.keys())}")
     
     config = LANGUAGE_MODELS[model_key].copy()
+    # A model entry must always have a matching architecture entry.  Keeping
+    # this explicit avoids silently falling back to a different model size.
+    if model_key not in MODEL_CONFIGS:
+        raise ValueError(f"Missing architecture configuration for text model: {model_key}")
     config.update(MODEL_CONFIGS[model_key])
     return config
 

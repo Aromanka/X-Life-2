@@ -54,7 +54,9 @@ def generate_assess_diet():
             meal_type=data.get("meal_type", "lunch"),
             temperature=data.get("temperature", 0.7),
             top_p=data.get("top_p", 0.92),
-            top_k=data.get("top_k", 3),
+            # ``top_k`` controls generation sampling; ``top_k_selection``
+            # controls the final number of safe recommendations.
+            top_k=data.get("top_k", 50),
             top_k_selection=data.get("top_k_selection", 3),
             use_vector=data.get("use_vector", False),
             rag_topk=data.get("rag_topk", 3),
@@ -86,7 +88,9 @@ def generate_assess_exercise():
             max_scale=data.get("max_scale", 1.3),
             temperature=data.get("temperature", 0.7),
             top_p=data.get("top_p", 0.92),
-            top_k=data.get("top_k", 3),
+            # ``top_k`` controls generation sampling; ``top_k_selection``
+            # controls the final number of safe recommendations.
+            top_k=data.get("top_k", 50),
             top_k_selection=data.get("top_k_selection", 3),
             meal_timing=data.get("meal_timing", ""),
             use_vector=data.get("use_vector", False),

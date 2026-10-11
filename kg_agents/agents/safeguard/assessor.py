@@ -100,25 +100,69 @@ class SafeguardAgent(BaseAgent):
             plan, plan_type, user_metadata, environment
         )
 
+        # Keep track of whether semantic review actually completed.  An empty
+        # finding set is different from a failed/absent review: in the latter
+        # case we must fail closed unless deterministic rules already provided
+        # an independent decision.
+        llm_review_completed = (
+            isinstance(llm_assessment, dict)
+            and (
+                "risk_factors" in llm_assessment
+                or "checks" in llm_assessment
+            )
+        )
+
         # Merge LLM findings BEFORE scoring
-        if llm_assessment:
-            for rf_dict in llm_assessment.get("risk_factors", []):
+        if isinstance(llm_assessment, dict):
+            for rf_dict in (llm_assessment.get("risk_factors") or []):
                 if isinstance(rf_dict, dict):
-                    risk_factors.append(RiskFactor(**rf_dict))
-            for check_dict in llm_assessment.get("checks", []):
+                    try:
+                        payload = dict(rf_dict)
+                        payload["severity"] = self._normalize_risk_level(
+                            payload.get("severity"), default=RiskLevel.HIGH
+                        )
+                        risk_factors.append(RiskFactor(**payload))
+                    except Exception:
+                        checks.append(self._llm_schema_failure("risk_factor"))
+                else:
+                    checks.append(self._llm_schema_failure("risk_factor"))
+            for check_dict in (llm_assessment.get("checks") or []):
                 if isinstance(check_dict, dict):
-                    checks.append(SafetyCheck(**check_dict))
+                    try:
+                        payload = dict(check_dict)
+                        if not payload.get("passed", False) and payload.get("severity") is None:
+                            payload["severity"] = RiskLevel.HIGH
+                        elif payload.get("severity") is not None:
+                            payload["severity"] = self._normalize_risk_level(
+                                payload["severity"], default=RiskLevel.HIGH
+                            )
+                        checks.append(SafetyCheck(**payload))
+                    except Exception:
+                        checks.append(self._llm_schema_failure("check"))
+                else:
+                    checks.append(self._llm_schema_failure("check"))
+        elif llm_assessment is not None:
+            # A non-null response with no schema is a failed semantic review,
+            # and should not be treated as an empty safe result.
+            checks.append(self._llm_schema_failure("assessment"))
 
         # --- MOVED SCORING LOGIC HERE ---
 
-        if ENABLE_RULE_BASED_CHECKS and SAFETY_MEASURE == 1:
+        if SAFETY_MEASURE == 1:
             # Calculate score based on ALL checks (Rules + LLM)
             passed_checks = sum(1 for c in checks if c.passed)
             total_checks = len(checks) if checks else 1  # Avoid div by zero
 
             # Base score
+            if not checks and not risk_factors and not llm_review_completed:
+                # No rule or semantic review completed.  Never turn an
+                # unavailable safety review into a safe 100-point result.
+                return self._assessment_unavailable(
+                    risk_factors=risk_factors,
+                    checks=checks,
+                    message="Safety assessment unavailable; manual review required"
+                )
             if not checks:
-                # If no checks ran at all (e.g. LLM failed and rules disabled), assume neutral/safe
                 base_score = 100
             else:
                 base_score = (passed_checks / total_checks) * 100
@@ -164,10 +208,10 @@ class SafeguardAgent(BaseAgent):
             )
 
             return SafetyAssessment(
-                score=final_score,
+                score=int(round(final_score)),
                 is_safe=is_safe,
                 status=status,
-                risk_level=RiskLevel.LOW,
+                risk_level=risk_level,
                 risk_factors=risk_factors,
                 safety_checks=checks,
                 recommendations=recommendations,
@@ -175,13 +219,27 @@ class SafeguardAgent(BaseAgent):
             )
         elif SAFETY_MEASURE == 2:
             # print(f"Evaluate LLM Assessment by risk factors...")
+            if not llm_review_completed and not checks and not risk_factors:
+                return self._assessment_unavailable(
+                    risk_factors=risk_factors,
+                    checks=checks,
+                    message="Safety assessment unavailable; manual review required"
+                )
+
             passed = True
             for rf in risk_factors:
-                penalty_values = ["high", "very high"]
-                # penalty_values = ["very high"]
-                if rf.severity.value in penalty_values:
+                if rf.severity in [RiskLevel.HIGH, RiskLevel.VERY_HIGH]:
                     passed = False
                     break
+            # Hard rule failures (high/very-high) are mandatory rejects.  A
+            # low/moderate failed check can remain a warning without making
+            # the entire plan unsafe.
+            if passed and any(
+                (not check.passed)
+                and check.severity in [RiskLevel.HIGH, RiskLevel.VERY_HIGH]
+                for check in checks
+            ):
+                passed = False
             if passed:
                 return SafetyAssessment(
                     score=100,
@@ -207,6 +265,13 @@ class SafeguardAgent(BaseAgent):
 
         elif SAFETY_MEASURE == 3:
             print(f"Evaluate LLM Assessment by checks...")
+            if not llm_review_completed and not checks and not risk_factors:
+                return self._assessment_unavailable(
+                    risk_factors=risk_factors,
+                    checks=checks,
+                    message="Safety assessment unavailable; manual review required"
+                )
+
             passed = True
             for c in checks:
                 if not c.passed:
@@ -235,7 +300,46 @@ class SafeguardAgent(BaseAgent):
                     warnings=[rf.description for rf in risk_factors if rf.severity in [RiskLevel.HIGH, RiskLevel.VERY_HIGH]]
                 )
         else:
-            raise ValueError("Invalid ENABLE_RULE_BASED_CHECKS")
+            raise ValueError("Invalid SAFETY_MEASURE")
+
+    @staticmethod
+    def _normalize_risk_level(value: Any, default: RiskLevel) -> RiskLevel:
+        """Normalize common LLM spellings such as ``very high`` safely."""
+        if isinstance(value, RiskLevel):
+            return value
+        normalized = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+        try:
+            return RiskLevel(normalized)
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _llm_schema_failure(kind: str) -> SafetyCheck:
+        """Represent malformed semantic output as a high-severity failure."""
+        return SafetyCheck(
+            check_name=f"llm_{kind}_schema",
+            passed=False,
+            message=f"LLM returned an invalid {kind} record",
+            severity=RiskLevel.HIGH,
+        )
+
+    @staticmethod
+    def _assessment_unavailable(
+        risk_factors: List[RiskFactor],
+        checks: List[SafetyCheck],
+        message: str
+    ) -> SafetyAssessment:
+        """Return a fail-closed result when no safety review completed."""
+        return SafetyAssessment(
+            score=0,
+            is_safe=False,
+            status=AssessmentStatus.REVIEW,
+            risk_level=RiskLevel.HIGH,
+            risk_factors=risk_factors,
+            safety_checks=checks,
+            recommendations=["Complete a safety review before using this plan"],
+            warnings=[message]
+        )
 
     def _check_diet_safety(
         self,
@@ -245,37 +349,81 @@ class SafeguardAgent(BaseAgent):
         checks = []
         risk_factors = []
 
-        # DietRecommendation.total_calories (int)
-        total_calories = plan.get("total_calories", 0)
+        def _as_number(value: Any) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
 
-        # Calorie range check
-        if total_calories < DIET_SAFETY_RULES["min_calories"]["value"]:
+        # DietRecommendation.total_calories represents one meal.  Daily
+        # calorie limits must only be applied when a daily total is explicitly
+        # supplied by the caller; otherwise a normal 500 kcal lunch would be
+        # incorrectly rejected as an unsafe all-day diet.
+        total_calories = _as_number(plan.get("total_calories"))
+        daily_calories = next(
+            (
+                _as_number(plan.get(key))
+                for key in (
+                    "daily_total_calories",
+                    "total_daily_calories",
+                    "daily_calories",
+                )
+                if plan.get(key) is not None
+            ),
+            None,
+        )
+        is_daily_plan = daily_calories is not None or bool(plan.get("is_daily_plan"))
+        if is_daily_plan and daily_calories is None:
+            daily_calories = total_calories
+
+        if is_daily_plan and daily_calories is not None:
+            if daily_calories < DIET_SAFETY_RULES["min_calories"]["value"]:
+                checks.append(SafetyCheck(
+                    check_name="min_calories",
+                    passed=False,
+                    message=DIET_SAFETY_RULES["min_calories"]["message"],
+                    severity=RiskLevel.HIGH
+                ))
+                risk_factors.append(RiskFactor(
+                    factor="extremely_low_calories",
+                    category="nutritional",
+                    severity=RiskLevel.HIGH,
+                    description=f"Daily calories {daily_calories:g} is dangerously low",
+                    recommendation="Consult a dietitian for safe calorie targets"
+                ))
+            elif daily_calories > DIET_SAFETY_RULES["max_calories"]["value"]:
+                checks.append(SafetyCheck(
+                    check_name="max_calories",
+                    passed=False,
+                    message=DIET_SAFETY_RULES["max_calories"]["message"],
+                    severity=RiskLevel.MODERATE
+                ))
+            else:
+                checks.append(SafetyCheck(
+                    check_name="calories_range",
+                    passed=True,
+                    message="Daily calorie intake within acceptable range"
+                ))
+        elif total_calories is not None:
+            max_meal = DIET_SAFETY_RULES["single_meal_calories"]["value"]
             checks.append(SafetyCheck(
-                check_name="min_calories",
-                passed=False,
-                message=DIET_SAFETY_RULES["min_calories"]["message"],
-                severity=RiskLevel.HIGH
+                check_name="single_meal_calories",
+                passed=total_calories <= max_meal,
+                message=(
+                    "Meal calories within acceptable range"
+                    if total_calories <= max_meal
+                    else f"Meal calories {total_calories:g} exceeds {max_meal} kcal"
+                ),
+                severity=None if total_calories <= max_meal else RiskLevel.LOW
             ))
-            risk_factors.append(RiskFactor(
-                factor="extremely_low_calories",
-                category="nutritional",
-                severity=RiskLevel.HIGH,
-                description=f"Total calories {total_calories} is dangerously low",
-                recommendation="Consult a dietitian for safe calorie targets"
-            ))
-        elif total_calories > DIET_SAFETY_RULES["max_calories"]["value"]:
-            checks.append(SafetyCheck(
-                check_name="max_calories",
-                passed=False,
-                message=DIET_SAFETY_RULES["max_calories"]["message"],
-                severity=RiskLevel.MODERATE
-            ))
-        else:
-            checks.append(SafetyCheck(
-                check_name="calories_range",
-                passed=True,
-                message="Calorie intake within acceptable range"
-            ))
+            if total_calories > max_meal:
+                risk_factors.append(RiskFactor(
+                    factor="high_single_meal_calories",
+                    category="nutritional",
+                    severity=RiskLevel.LOW,
+                    description=f"Meal calories {total_calories:g} is high",
+                    recommendation="Distribute calories across meals"
+                ))
 
         macros = plan.get("macro_nutrients", {})
         if macros:
@@ -308,14 +456,26 @@ class SafeguardAgent(BaseAgent):
         if meal_plan:
             for meal_type, items in meal_plan.items():
                 if isinstance(items, list):
-                    meal_calories = sum(item.get("calories", 0) for item in items if isinstance(item, dict))
+                    meal_calories = sum(
+                        _as_number(item.get("calories")) or 0
+                        for item in items if isinstance(item, dict)
+                    )
                 elif isinstance(items, dict):
                     # Might be a MealPlanItem object
-                    meal_calories = items.get("total_calories", 0)
+                    meal_calories = _as_number(items.get("total_calories")) or 0
                 else:
                     meal_calories = 0
 
-                if meal_calories > DIET_SAFETY_RULES["single_meal_calories"]["value"]:
+                # ``total_calories`` above already covers the current
+                # DietRecommendation.  This loop is for explicit multi-meal
+                # plans only, avoiding duplicate findings for one meal.
+                if (
+                    meal_calories > DIET_SAFETY_RULES["single_meal_calories"]["value"]
+                    and not (
+                        isinstance(plan.get("items"), list)
+                        and meal_type == plan.get("meal_type")
+                    )
+                ):
                     checks.append(SafetyCheck(
                         check_name="single_meal_calories",
                         passed=False,
@@ -414,6 +574,12 @@ class SafeguardAgent(BaseAgent):
                 break
 
         if has_hiit and weekly_freq > 3:
+            checks.append(SafetyCheck(
+                check_name="hiit_frequency",
+                passed=False,
+                message="HIIT sessions too frequent without adequate recovery",
+                severity=RiskLevel.HIGH
+            ))
             risk_factors.append(RiskFactor(
                 factor="hiit_frequency",
                 category="exercise",
@@ -457,13 +623,23 @@ class SafeguardAgent(BaseAgent):
 
         if plan_type == "diet":
             # Extract food items
+            direct_items = plan.get("items", [])
+            if isinstance(direct_items, list):
+                for item in direct_items:
+                    if isinstance(item, dict):
+                        food_name = item.get("food") or item.get("food_name", "")
+                        if food_name:
+                            content_parts.append(str(food_name))
+                    elif hasattr(item, "food"):
+                        content_parts.append(str(item.food))
+
             meal_plan = plan.get("meal_plan", {})
             if isinstance(meal_plan, dict):
                 for meal_type, items in meal_plan.items():
                     if isinstance(items, list):
                         for item in items:
                             if isinstance(item, dict):
-                                food_name = item.get("food", "")
+                                food_name = item.get("food") or item.get("food_name", "")
                                 if food_name:
                                     content_parts.append(food_name)
                             elif hasattr(item, 'food'):
@@ -505,11 +681,13 @@ class SafeguardAgent(BaseAgent):
         risk_factors = []
 
         conditions = user_metadata.get("medical_conditions", [])
+        if isinstance(conditions, str):
+            conditions = [conditions]
 
         plan_content = self._extract_plan_content_text(plan, plan_type)
 
         for condition in conditions:
-            condition_lower = condition.lower()
+            condition_lower = str(condition).lower()
             matched_condition = None
             for known_condition in CONDITION_RESTRICTIONS:
                 if condition_lower == known_condition or condition_lower.replace("_", "") == known_condition.replace("_", ""):
@@ -525,22 +703,68 @@ class SafeguardAgent(BaseAgent):
 
                     for rule_key, rule_desc in diet_rules.items():
                         if "avoid" in rule_key or "max" in rule_key:
-                            # Check if plan contains forbidden items
+                            # Configuration uses names such as
+                            # ``avoid_high_sugar`` while the keyword table is
+                            # keyed by ``high_sugar``.  Normalize both forms.
                             forbidden_keywords = {
                                 "high_sugar": ["sugar", "candy", "cake", "ice cream", "sweet"],
                                 "high_sodium": ["salt", "soy sauce", "pickled", "processed"],
                                 "high_cholesterol": ["egg yolk", "liver", "organ meat"],
                                 "caffeine": ["coffee", "tea", "caffeine"],
                             }
-                            keywords = forbidden_keywords.get(rule_key, [])
+                            keyword_key = rule_key.removeprefix("avoid_")
+                            keywords = forbidden_keywords.get(keyword_key, [])
                             for keyword in keywords:
                                 if keyword in plan_content:
+                                    checks.append(SafetyCheck(
+                                        check_name=f"{matched_condition}_{rule_key}",
+                                        passed=False,
+                                        message=f"Plan contains {keyword} which should be avoided for {condition}",
+                                        severity=RiskLevel.HIGH
+                                    ))
                                     risk_factors.append(RiskFactor(
                                         factor=f"{matched_condition}_{rule_key}",
                                         category="medical",
                                         severity=RiskLevel.HIGH,
                                         description=f"Plan contains {keyword} which should be avoided for {condition}",
                                         recommendation=f"Remove {rule_desc} for {condition} management"
+                                    ))
+
+                            # ``max_sodium`` is a numeric daily limit.  Read it
+                            # only when the caller provides an explicit sodium
+                            # value; otherwise leave the rule auditable but do
+                            # not invent nutrition data for a single meal.
+                            if rule_key == "max_sodium":
+                                sodium = next(
+                                    (
+                                        plan.get(key)
+                                        for key in (
+                                            "daily_sodium_mg",
+                                            "total_sodium_mg",
+                                            "sodium_mg",
+                                            "sodium",
+                                        )
+                                        if plan.get(key) is not None
+                                    ),
+                                    None,
+                                )
+                                try:
+                                    sodium = float(sodium)
+                                except (TypeError, ValueError):
+                                    sodium = None
+                                if sodium is not None and sodium > float(rule_desc):
+                                    checks.append(SafetyCheck(
+                                        check_name=f"{matched_condition}_{rule_key}",
+                                        passed=False,
+                                        message=f"Sodium {sodium:g}mg exceeds {rule_desc}mg",
+                                        severity=RiskLevel.HIGH
+                                    ))
+                                    risk_factors.append(RiskFactor(
+                                        factor=f"{matched_condition}_{rule_key}",
+                                        category="medical",
+                                        severity=RiskLevel.HIGH,
+                                        description=f"Sodium {sodium:g}mg exceeds the recommended limit",
+                                        recommendation="Reduce sodium-rich foods"
                                     ))
 
                 # Check exercise restrictions
@@ -555,9 +779,16 @@ class SafeguardAgent(BaseAgent):
                                 "high_impact": ["running", "jumping", "jump rope"],
                                 "breath_holding": ["valsalva", "heavy lifting"],
                             }
-                            keywords = forbidden_exercises.get(rule_key, [])
+                            keyword_key = rule_key.removeprefix("avoid_")
+                            keywords = forbidden_exercises.get(keyword_key, [])
                             for keyword in keywords:
                                 if keyword in plan_content:
+                                    checks.append(SafetyCheck(
+                                        check_name=f"{matched_condition}_{rule_key}",
+                                        passed=False,
+                                        message=f"Exercise plan contains {keyword} which violates {condition} restriction",
+                                        severity=RiskLevel.HIGH
+                                    ))
                                     risk_factors.append(RiskFactor(
                                         factor=f"{matched_condition}_{rule_key}",
                                         category="medical",
@@ -565,6 +796,55 @@ class SafeguardAgent(BaseAgent):
                                         description=f"Exercise plan contains {keyword} which violates {condition} restriction",
                                         recommendation=f"Modify plan to comply with {rule_desc}"
                                     ))
+
+                    # ``max_heart_rate`` is configured as an age-dependent
+                    # expression.  Compare it when the plan carries a measured
+                    # or planned heart-rate value.
+                    if "max_heart_rate" in ex_rules:
+                        heart_rate = next(
+                            (
+                                plan.get(key)
+                                for key in (
+                                    "max_heart_rate",
+                                    "heart_rate",
+                                    "peak_heart_rate",
+                                )
+                                if plan.get(key) is not None
+                            ),
+                            None,
+                        )
+                        age = user_metadata.get("age")
+                        try:
+                            heart_rate = float(heart_rate)
+                            age = float(age)
+                            max_heart_rate = 220.0 - age * 0.7
+                        except (TypeError, ValueError):
+                            heart_rate = age = None
+                            max_heart_rate = None
+                        if (
+                            heart_rate is not None
+                            and max_heart_rate is not None
+                            and heart_rate > max_heart_rate
+                        ):
+                            checks.append(SafetyCheck(
+                                check_name=f"{matched_condition}_max_heart_rate",
+                                passed=False,
+                                message=(
+                                    f"Heart rate {heart_rate:g} exceeds the calculated limit "
+                                    f"{max_heart_rate:g}"
+                                ),
+                                severity=RiskLevel.HIGH
+                            ))
+                            risk_factors.append(RiskFactor(
+                                factor=f"{matched_condition}_max_heart_rate",
+                                category="medical",
+                                severity=RiskLevel.HIGH,
+                                description=(
+                                    f"Heart rate {heart_rate:g} exceeds the calculated limit "
+                                    f"{max_heart_rate:g}"
+                                ),
+                                recommendation="Reduce intensity and seek medical clearance"
+                            ))
 
         return checks, risk_factors
 

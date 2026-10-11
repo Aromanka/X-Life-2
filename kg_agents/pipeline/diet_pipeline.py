@@ -69,8 +69,13 @@ class DietPipeline:
     portion variants, assesses safety, and selects the best ones.
     """
 
-    def __init__(self):
+    def __init__(self, world_model_scorer=None):
         self.safeguard = SafeguardAgent()
+        # Optional dependency-injected world-model scorer.  Loading the
+        # research VLM is intentionally left to the application layer; when
+        # supplied, this callable must return a learned ranking score for one
+        # candidate and the same participant state.
+        self.world_model_scorer = world_model_scorer
 
     def generate(
         self,
@@ -89,7 +94,8 @@ class DietPipeline:
         top_k_selection: int = 3,
         output_path: str = "plan.json",
         use_vector: bool = False,
-        rag_topk: str = 3
+        rag_topk: str = 3,
+        world_model_scorer=None
     ) -> DietPipelineOutput:
         """
         Generate meal options with safety assessment.
@@ -105,7 +111,7 @@ class DietPipeline:
             temperature: LLM temperature (0.0-1.0)
             top_p: LLM top_p for nucleus sampling (0.0-1.0)
             top_k: LLM top_k for top-k sampling
-            top_k_selection: Number of top plans to select by safety score
+            top_k_selection: Number of safe plans to return after ranking
             output_path: Path to save all plans JSON
             use_vector: Use vector search (GraphRAG) instead of keyword matching
             rag_topk: top_k similar enetities for GraphRAG
@@ -167,8 +173,15 @@ class DietPipeline:
                 generated_at=datetime.now().isoformat()
             )
 
-        # Convert to dicts for assessment
-        all_plans_dict = [c.model_dump() for c in meal_candidates]
+        # Convert to dicts for assessment.  Generators restart their local
+        # candidate counter on each base-plan call, so normalize identifiers
+        # once per request before any assessment is stored or joined back.
+        all_plans_dict = []
+        for request_index, candidate in enumerate(meal_candidates, start=1):
+            plan = candidate.model_dump()
+            plan["_source_id"] = plan.get("id")
+            plan["id"] = request_index
+            all_plans_dict.append(plan)
 
         # Step 2: Assess each plan through safeguard
         print(f"\n[2/4] Assessing {len(all_plans_dict)} plans through safeguard...")
@@ -195,15 +208,35 @@ class DietPipeline:
                 plan["_assessment"] = assessments[plan_id]
 
         # Step 3: Select top_k by safety score
-        print(f"\n[3/4] Selecting top {top_k} plans by safety score...")
+        print(f"\n[3/4] Selecting top {top_k_selection} plans by safety score...")
 
-        # Sort by score (higher first)
+        # Safety is a gate: only plans explicitly marked safe can become
+        # recommendations.  Keep all plans in the output for auditability.
+        safe_plans = [
+            plan for plan in all_plans_dict
+            if plan.get("_assessment", {}).get("is_safe") is True
+        ]
+
+        scorer = world_model_scorer or self.world_model_scorer
+        if scorer is not None:
+            for plan in safe_plans:
+                try:
+                    learned = scorer(plan, user_metadata, env)
+                except TypeError:
+                    learned = scorer(plan, user_metadata)
+                if isinstance(learned, dict):
+                    learned = learned.get("ranking_score", learned.get("score"))
+                if learned is not None:
+                    plan["_ranking_score"] = float(learned)
+
+        # Sort safe plans by learned score when a world model is injected;
+        # otherwise retain the deterministic safety-score fallback.
         sorted_plans = sorted(
-            all_plans_dict,
-            key=lambda p: p.get("_assessment", {}).get("score", 0),
+            safe_plans,
+            key=lambda p: p.get("_ranking_score", p.get("_assessment", {}).get("score", 0)),
             reverse=True
         )
-        top_plans = sorted_plans[:top_k]
+        top_plans = sorted_plans[:top_k_selection]
 
         # for i, plan in enumerate(top_plans, 1):
         #     score = plan.get("_assessment", {}).get("score", 0)

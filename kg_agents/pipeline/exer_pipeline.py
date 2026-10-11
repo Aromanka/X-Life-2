@@ -109,6 +109,12 @@ def exercise_generate(
             variants_cnt = 0
             for variant_name, plan in variants.items():
                 plan_dict = plan.model_dump()
+                # A base plan id is reused by every scaled variant and may
+                # also restart on each generation call.  Preserve it for
+                # provenance, but assign a request-local id for assessment
+                # joins and output lookup.
+                plan_dict["_source_id"] = plan_dict.get("id")
+                plan_dict["id"] = len(all_plans_list) + 1
                 plan_dict["_variant"] = variant_name
                 plan_dict["_base_id"] = base_id
                 all_plans_list.append(plan_dict)
@@ -128,8 +134,9 @@ class ExercisePipeline:
     intensity variants, assesses safety, and selects the best ones.
     """
 
-    def __init__(self):
+    def __init__(self, world_model_scorer=None):
         self.safeguard = SafeguardAgent()
+        self.world_model_scorer = world_model_scorer
 
     def generate(
         self,
@@ -148,7 +155,8 @@ class ExercisePipeline:
         output_path: str = "exer_plan.json",
         meal_timing: str = "",
         use_vector: bool = False,
-        rag_topk: int = 3
+        rag_topk: int = 3,
+        world_model_scorer=None
     ) -> ExercisePipelineOutput:
         """
         Generate exercise options with safety assessment.
@@ -164,7 +172,7 @@ class ExercisePipeline:
             max_scale: Maximum scale factor for variants
             temperature: LLM temperature (0.0-1.0)
             top_p: LLM top_p for nucleus sampling (0.0-1.0)
-            top_k: Number of top plans to select by safety score
+            top_k: Number of candidates to request from the generator
             output_path: Path to save all plans JSON
             meal_timing: Meal timing context
             use_vector: Use vector search (GraphRAG) instead of keyword matching
@@ -240,10 +248,30 @@ class ExercisePipeline:
         # Step 3: Select top_k_selection by safety score
         print(f"\n[3/4] Selecting top {top_k_selection} plans by safety score...")
 
-        # Sort by score (higher first)
+        # Safety is a gate: unsafe plans remain in ``all_plans`` for audit,
+        # but cannot enter the final recommendation list.
+        safe_plans = [
+            plan for plan in all_plans_list
+            if plan.get("_assessment", {}).get("is_safe") is True
+        ]
+
+        scorer = world_model_scorer or self.world_model_scorer
+        if scorer is not None:
+            for plan in safe_plans:
+                try:
+                    learned = scorer(plan, user_metadata, env)
+                except TypeError:
+                    learned = scorer(plan, user_metadata)
+                if isinstance(learned, dict):
+                    learned = learned.get("ranking_score", learned.get("score"))
+                if learned is not None:
+                    plan["_ranking_score"] = float(learned)
+
+        # Sort safe plans by learned score when a world model is injected;
+        # otherwise keep the deterministic safety-score fallback.
         sorted_plans = sorted(
-            all_plans_list,
-            key=lambda p: p.get("_assessment", {}).get("score", 0),
+            safe_plans,
+            key=lambda p: p.get("_ranking_score", p.get("_assessment", {}).get("score", 0)),
             reverse=True
         )
         top_plans = sorted_plans[:top_k_selection]

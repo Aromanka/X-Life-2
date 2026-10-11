@@ -202,7 +202,7 @@ For detailed prompt sample of prescription generation, prescription assessment a
 
 ### 2. 🧠 Diet/Exercise Sub-world model and Ranking Module
 
-Diet/Exercise sub-world models predict latent metabolic state for diet prescription candidates. The glucose predict head simulates the glycemic trajectories 
+Diet/Exercise sub-world models predict latent metabolic states for diet and exercise candidates. The public model now exposes separate action-conditioned transition modules with trajectory and dynamics branches, cross-attention fusion, a future glucose head, and a quantitative `ranking_score` output.
 
 1. Data Preparation.
 Prepare the user metadata and physiological trajectory in the following format:
@@ -244,13 +244,13 @@ Prepare the user metadata and physiological trajectory in the following format:
       }
 ]
 ```
-We also prepare the minimal dataset in `./world_model+ranking_module/data`. `sample_data.json` includes the metadata, diet information, exercise information, sleep information. `sample_meal_01.jpg` is the diet image.
+We also prepare the minimal dataset in `./world_model+ranking_module/data`. `sample_data.json` includes metadata, diet information, exercise information, sleep information and CGM records. Image files are optional; the public example uses the CNN backup when the referenced meal image is unavailable.
 
-2.Model config. In `model_config.py`, the `default` settings can be used directly, which are consistent with the experimental configuration reported in our paper.  Notably, X-Life supports all open-source LLMs and VLMs.
+2.Model config. In `world_model+ranking_module/model_config.py`, the default research configuration resolves to `Qwen/Qwen3-8B` for text features and `Qwen/Qwen2.5-VL-72B-Instruct` for the diet image-language encoder. The download helpers accept the selected configuration and pass the resolved local paths through to the model. The `cnn-backup` vision option is intended for lightweight verification and is not the research model.
 ```bash
-vim world_model/model_config.py
+vim world_model+ranking_module/model_config.py
 ```
-3.Training. The `train()` in `main.py` handles the model training process. During training, it reports the loss and Pearson correlation coefficient (Pearson's r) at each epoch. When saving checkpoints, the model with the best Pearson's r on the validation set is selected and stored as the optimal model. Users are required to modify `image_dir`, `data_path`, `save_dir` and `get_training_config() `. After configuring the parameters, run the following command to train the model：
+3.Training. The `train()` entry point supports the manuscript's explicit training phases through `training_phase`: `encoder_pretraining`, `world_model`, `preference_alignment`, and `participant_update`. The world-model phase freezes the action encoders and trains transition, fusion, decoder and ranking modules. Data splitting is participant-level with five reproducible seeds; all meals from a participant stay in one partition. `split_index` selects one recorded split; running and aggregating all five splits remains an experiment-level step. CGM padding is tracked with validity masks and excluded from loss and metrics. The bundled sample has one participant and is only a format/smoke-test fixture; training requires a dataset with at least two participants. Users are required to set `image_dir`, `data_path`, `save_dir` and the desired training phase before running:
 ```bash
 python main.py
 ```
@@ -260,7 +260,11 @@ python main.py
 python main.py
 ```
 
-5.Multi-stage alignment. We follow the official [repo](https://github.com/eric-mitchell/direct-preference-optimization) to complete multi-stage alignment, enabling the model to output personalized lifestyle prescriptions.
+5.Multi-stage alignment. `CGMPredictionTrainerWithImage.dpo_loss()` implements the score-margin objective for preferred/rejected prescriptions from the same participant state, with an optional frozen reference-model margin. The public sample dataset does not contain preference pairs, so preference alignment requires a project-specific dataset and caller that supplies those pairs; the helper does not treat safety scores as learned preference scores.
+
+When a trained world model is available, inject a callable as `world_model_scorer` into `DietPipeline` or `ExercisePipeline` (or pass it to `generate`). The pipeline first removes candidates with `is_safe=False`, then stores the learned value as `_ranking_score` and ranks only the remaining candidates. Without an injected scorer, it uses the safety score as an explicit fallback and does not claim to have learned a physiological ranking.
+
+The transition, trajectory, dynamics, fusion, ranking, training-phase and DPO additions provide stable interfaces and a small differentiable reference path for integration tests. They are not a claim that the paper's unpublished losses, checkpoints or preference data have been reconstructed. Exact CGM patch settings, auxiliary omics decoders, encoder-pretraining labels, preference-pair construction/reference checkpoints, and the participant-update data contract still need to be supplied for a paper-faithful reproduction.
 
 
 ### 3. 🛡️ Safety Module

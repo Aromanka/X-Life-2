@@ -6,6 +6,43 @@ from torch.utils.data import Dataset
 from datetime import datetime
 
 
+class _FallbackTokenizer:
+    """Small deterministic tokenizer used when model weights are unavailable."""
+
+    def __call__(self, text, max_length=512, padding='max_length', truncation=True,
+                 return_tensors='pt'):
+        import hashlib
+        import torch
+        token_count = min(max_length, max(1, len(str(text).split())))
+        digest = hashlib.sha256(str(text).encode('utf-8')).digest()
+        ids = [int(digest[i % len(digest)]) + 1 for i in range(token_count)]
+        if padding == 'max_length' and token_count < max_length:
+            ids += [0] * (max_length - token_count)
+        mask = [1] * token_count + [0] * (max_length - token_count)
+        result = {'input_ids': torch.tensor([ids], dtype=torch.long),
+                  'attention_mask': torch.tensor([mask], dtype=torch.long)}
+        return result
+
+
+def get_tokenizer(model_key=None, use_mirror=True):
+    """Load the tokenizer matching the configured text model.
+
+    The model key is resolved through ``model_config`` so tokenizer and model
+    cannot silently point at different checkpoints.  A deterministic fallback
+    keeps the lightweight sample pipeline runnable without downloading weights.
+    """
+    try:
+        from transformers import AutoTokenizer
+        from model_config import get_model_config
+        model_name = get_model_config(model_key)['name']
+        if use_mirror:
+            os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+        return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    except Exception as exc:
+        print(f"Tokenizer unavailable; using deterministic fallback: {exc}")
+        return _FallbackTokenizer()
+
+
 class SampleImageDataset(Dataset):
     """Dataset class for loading and preprocessing sample_data.json with image-based food data"""
     
@@ -39,7 +76,7 @@ class SampleImageDataset(Dataset):
             meals = patient.get('meals', [])
             
             # If no meal data, create a sample with empty meal
-            if not meals:
+            if not meals and not patient.get('exercise_events'):
                 sample = {
                     'subject_id': subject_id,
                     'subject_name': subject_name,
@@ -52,6 +89,28 @@ class SampleImageDataset(Dataset):
                     'cgm_type': 'none'
                 }
                 self.samples.append(sample)
+
+            # Newer minimal/research bundles may contain exercise events that
+            # are not attached to a meal. Preserve those trajectories as
+            # first-class samples instead of silently dropping a participant
+            # who has exercise data but no meal record.
+            for exercise_event in patient.get('exercise_events', []):
+                cgm_pre = exercise_event.get('cgm_pre_exercise', [])
+                cgm_post = exercise_event.get('cgm_post_exercise', [])
+                if not cgm_pre or not cgm_post:
+                    continue
+                self.samples.append({
+                    'subject_id': subject_id,
+                    'subject_name': subject_name,
+                    'metadata': metadata,
+                    'food_data': {},
+                    'exercise_data': exercise_event,
+                    'sleep_data': {},
+                    'cgm_pre': cgm_pre,
+                    'cgm_post': cgm_post,
+                    'cgm_type': 'exercise',
+                    'event_id': exercise_event.get('event_id', '')
+                })
                 continue
             
             # Create a sample for each meal
@@ -198,7 +257,9 @@ class SampleImageDataset(Dataset):
             'exercise_type': exercise_data.get('type', 'Unknown'),
             'duration': exercise_data.get('duration', 0),
             'calories': exercise_data.get('calories', 0),
-            'heart_rate': exercise_data.get('heart_rate', None)
+            'heart_rate': exercise_data.get('heart_rate', None),
+            'recorded_at': exercise_data.get('recorded_at', ''),
+            'time_basis': exercise_data.get('time_basis', '')
         }
         
         return info
