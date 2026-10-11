@@ -1,4 +1,4 @@
-# XLife minimal test dataset
+# X-Life minimal test dataset
 
 It contains 3 pseudonymous participants and 6 observed event windows: 2 meals, 2 exercise records, and 2 nights. 
 
