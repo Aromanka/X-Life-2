@@ -331,14 +331,16 @@ class CGMTransformerDecoder(nn.Module):
 
         self.output_projection = nn.Linear(d_model, output_dim)
 
-    def forward(self, encoded_cgm, encoded_text, target_sequence=None):
+    def forward(self, encoded_cgm, encoded_text, target_sequence=None, target_len=None):
         """
         Forward pass
 
         Args:
             encoded_cgm: Encoded CGM features [batch_size, seq_len, d_model]
-            encoded_text: Encoded text features [batch_size, d_model]
+            encoded_text: Future-state context [batch_size, d_model] or a
+                latent rollout [batch_size, horizon, d_model]
             target_sequence: Target sequence (used during training) [batch_size, target_len, 1]
+            target_len: Inference horizon when ``target_sequence`` is absent.
 
         Returns:
             predicted_cgm: Predicted CGM sequence [batch_size, target_len, 1]
@@ -358,7 +360,15 @@ class CGMTransformerDecoder(nn.Module):
             target_embedding = self.target_input_projection(decoder_inputs)
             target_embedding = self.pos_encoder(target_embedding.transpose(0, 1)).transpose(0, 1)
 
-            memory = encoded_text.unsqueeze(1).expand(-1, target_len, -1)
+            if encoded_text.dim() == 2:
+                memory = encoded_text.unsqueeze(1).expand(-1, target_len, -1)
+            elif encoded_text.dim() == 3:
+                # Preserve every learned transition step as cross-attention
+                # memory.  The decoder can therefore use the complete latent
+                # trajectory instead of only the final state.
+                memory = encoded_text
+            else:
+                raise ValueError("encoded_text must have shape [B,D] or [B,H,D]")
             causal_mask = torch.triu(
                 torch.ones(target_len, target_len, device=target_embedding.device, dtype=torch.bool),
                 diagonal=1,
@@ -372,7 +382,9 @@ class CGMTransformerDecoder(nn.Module):
             predicted_cgm = self.output_projection(decoded)
 
         else:
-            target_len = seq_len
+            target_len = seq_len if target_len is None else int(target_len)
+            if target_len < 1:
+                raise ValueError("target_len must be >= 1")
 
             output_sequence = torch.zeros(batch_size, target_len, 1, device=encoded_cgm.device)
 
@@ -382,7 +394,15 @@ class CGMTransformerDecoder(nn.Module):
                 current_seq = self.target_input_projection(current_seq)
                 current_seq = self.pos_encoder(current_seq.transpose(0, 1)).transpose(0, 1)
 
-                memory = encoded_text.unsqueeze(1).expand(-1, i+1, -1)
+                if encoded_text.dim() == 2:
+                    memory = encoded_text.unsqueeze(1).expand(-1, i+1, -1)
+                elif encoded_text.dim() == 3:
+                    # At inference step i, only states up to i are visible;
+                    # exposing the full rollout here would leak future latent
+                    # states into earlier glucose predictions.
+                    memory = encoded_text[:, :i + 1, :]
+                else:
+                    raise ValueError("encoded_text must have shape [B,D] or [B,H,D]")
 
                 decoded = self.transformer_decoder(
                     tgt=current_seq,
@@ -600,9 +620,14 @@ class ImageEncoder(nn.Module):
 class ActionTransitionModule(nn.Module):
     """Action-conditioned latent transition with trajectory and dynamics branches."""
 
-    def __init__(self, state_dim, action_dim, dropout=0.1):
+    def __init__(self, state_dim, action_dim=None, dropout=0.1):
         super().__init__()
-        self.action_projection = nn.Linear(action_dim, state_dim)
+        # Parent action encoders may already project into the transition
+        # space.  ``None`` keeps that representation unchanged; a concrete
+        # action_dim preserves the standalone raw-action interface.
+        self.action_projection = (
+            nn.Identity() if action_dim is None else nn.Linear(action_dim, state_dim)
+        )
         self.transition = nn.Sequential(
             nn.Linear(state_dim * 2, state_dim),
             nn.LayerNorm(state_dim),
@@ -621,6 +646,41 @@ class ActionTransitionModule(nn.Module):
         trajectory_state = self.trajectory_branch(dynamic_state)
         return dynamic_state, trajectory_state
 
+    def rollout(self, physiological_state, action_state, horizon=1):
+        """Roll the learned transition forward for ``horizon`` action steps.
+
+        ``action_state`` may be one action shared by every step (``[B, A]``)
+        or a sequence of actions (``[B, H, A]``).  Returning every latent
+        state makes the transition observable for counterfactual evaluation;
+        callers can use the full sequence as decoder memory or the final state
+        for scalar heads.  This is
+        intentionally a learned predictive rollout, not a causal claim:
+        identifying an intervention effect requires suitable experimental or
+        longitudinal variation in the training data.
+        """
+        horizon = int(horizon)
+        if horizon < 1:
+            raise ValueError("horizon must be >= 1")
+        if action_state.dim() == 2:
+            action_state = action_state.unsqueeze(1).expand(-1, horizon, -1)
+        elif action_state.dim() == 3:
+            if action_state.size(1) != horizon:
+                raise ValueError(
+                    f"action sequence has {action_state.size(1)} steps, expected {horizon}"
+                )
+        else:
+            raise ValueError("action_state must have shape [batch, action] or [batch, steps, action]")
+
+        dynamic_states = []
+        trajectory_states = []
+        state = physiological_state
+        for step in range(horizon):
+            dynamic_state, trajectory_state = self(state, action_state[:, step, :])
+            dynamic_states.append(dynamic_state)
+            trajectory_states.append(trajectory_state)
+            state = dynamic_state
+        return torch.stack(dynamic_states, dim=1), torch.stack(trajectory_states, dim=1)
+
 
 class CrossAttentionFusion(nn.Module):
     """Fuse diet and exercise future states with cross-attention."""
@@ -633,10 +693,16 @@ class CrossAttentionFusion(nn.Module):
         self.norm = nn.LayerNorm(state_dim)
 
     def forward(self, diet_state, exercise_state):
-        diet_tokens = diet_state.unsqueeze(1)
-        exercise_tokens = exercise_state.unsqueeze(1)
+        diet_was_sequence = diet_state.dim() == 3
+        exercise_was_sequence = exercise_state.dim() == 3
+        diet_tokens = diet_state if diet_was_sequence else diet_state.unsqueeze(1)
+        exercise_tokens = exercise_state if exercise_was_sequence else exercise_state.unsqueeze(1)
         attended, _ = self.attention(diet_tokens, exercise_tokens, exercise_tokens)
-        return self.norm((diet_tokens + attended).squeeze(1))
+        fused = self.norm(diet_tokens + attended)
+        # A one-step transition keeps the historical vector-shaped API.  For
+        # a multi-step rollout, return [B,H,D] so downstream decoder/ranker
+        # layers can attend to the full trajectory.
+        return fused if diet_was_sequence or exercise_was_sequence else fused.squeeze(1)
 
 
 class PrescriptionRankingHead(nn.Module):
@@ -652,12 +718,18 @@ class PrescriptionRankingHead(nn.Module):
     def forward(self, fused_state, target_len=None):
         glucose = self.glucose_head(fused_state)
         if target_len is not None:
-            if target_len <= glucose.size(1):
-                glucose = glucose[:, :target_len]
+            if target_len <= glucose.size(-1):
+                glucose = glucose[..., :target_len]
             else:
-                tail = glucose[:, -1:].expand(-1, target_len - glucose.size(1))
-                glucose = torch.cat([glucose, tail], dim=1)
+                tail = glucose[..., -1:].expand(*glucose.shape[:-1], target_len - glucose.size(-1))
+                glucose = torch.cat([glucose, tail], dim=-1)
         score = self.score_head(fused_state).squeeze(-1)
+        if fused_state.dim() == 3:
+            # Keep the public ranking output scalar per candidate while using
+            # every latent transition step.  The per-step values are exposed
+            # by the model's ``return_details`` path for diagnostics.
+            glucose = glucose.mean(dim=1)
+            score = score.mean(dim=1)
         return glucose, score
 
 
@@ -726,10 +798,13 @@ class CGMPredictionModelWithImage(nn.Module):
             dropout=dropout
         )
 
-        fusion_input_dim = text_hidden_dim * 4 + cgm_d_model
-        if self.use_image_features:
-            fusion_input_dim += text_hidden_dim
-
+        # Keep the physiological state independent from the candidate action.
+        # Food/exercise/image features are supplied only to their respective
+        # action encoders below.  If they were concatenated here, replacing a
+        # candidate action for a what-if simulation would still leave the
+        # observed action in ``physiological_state`` and leak the factual
+        # treatment into the counterfactual branch.
+        fusion_input_dim = text_hidden_dim * 2 + cgm_d_model
         self.feature_fusion = nn.Sequential(
             nn.Linear(fusion_input_dim, cgm_d_model),
             nn.ReLU(),
@@ -740,8 +815,11 @@ class CGMPredictionModelWithImage(nn.Module):
         diet_action_dim = text_hidden_dim * (2 if self.use_image_features else 1)
         self.diet_action_projection = nn.Linear(diet_action_dim, cgm_d_model)
         self.exercise_action_projection = nn.Linear(text_hidden_dim, cgm_d_model)
-        self.diet_transition = ActionTransitionModule(cgm_d_model, cgm_d_model, dropout)
-        self.exercise_transition = ActionTransitionModule(cgm_d_model, cgm_d_model, dropout)
+        # The action projections above are the action encoders.  The latent
+        # transition consumes their projected vectors directly, avoiding a
+        # second unlabelled projection inside the transition module.
+        self.diet_transition = ActionTransitionModule(cgm_d_model, None, dropout)
+        self.exercise_transition = ActionTransitionModule(cgm_d_model, None, dropout)
         self.future_state_fusion = CrossAttentionFusion(cgm_d_model, nhead=cgm_nhead, dropout=dropout)
         self.ranking_head = PrescriptionRankingHead(cgm_d_model, max_future_len=max_future_len)
 
@@ -768,7 +846,8 @@ class CGMPredictionModelWithImage(nn.Module):
                 exercise_input_ids=None, exercise_attention_mask=None,
                 cgm_preprandial=None, cgm_postprandial=None,
                 food_images=None, cgm_preprandial_mask=None,
-                return_details=False):
+                diet_action_override=None, exercise_action_override=None,
+                rollout_horizon=None, return_details=False):
         """
         Forward pass
 
@@ -786,6 +865,18 @@ class CGMPredictionModelWithImage(nn.Module):
                 padding [batch_size, seq_len]
             cgm_postprandial: Postprandial CGM sequence (used during training) [batch_size, target_len]
             food_images: Food image list [batch_size]
+            diet_action_override: Optional diet action embedding.  It can be a
+                raw diet embedding with dimension ``text_hidden_dim`` (or
+                ``2 * text_hidden_dim`` when images are enabled), or a
+                projected ``cgm_d_model`` embedding.  Supplying this replaces
+                the observed meal action for what-if simulation.
+            exercise_action_override: Optional projected/raw exercise action
+                embedding, with the same replacement semantics.
+            rollout_horizon: Number of learned transition steps.  If omitted,
+                training uses the observed post-CGM length and inference uses
+                the configured horizon. A scalar action is reused at each
+                step; a ``[batch, horizon, dim]`` override supplies a
+                different action at each step.
 
         Returns:
             predicted_cgm: Predicted postprandial CGM sequence [batch_size, target_len, 1]
@@ -813,36 +904,72 @@ class CGMPredictionModelWithImage(nn.Module):
             ).unsqueeze(-1)
             pooled_cgm = (encoded_cgm * cgm_weights).sum(dim=1) / cgm_weights.sum(dim=1).clamp_min(1.0)
 
-        if self.use_image_features:
-            fused_features = torch.cat([
-                encoded_metadata, encoded_sleep, encoded_food, encoded_exercise,
-                encoded_images, pooled_cgm
-            ], dim=1)
-        else:
-            fused_features = torch.cat([
-                encoded_metadata, encoded_sleep, encoded_food, encoded_exercise,
-                pooled_cgm
-            ], dim=1)
+        # Baseline state available immediately before the decision point.  The
+        # candidate diet/exercise representations are intentionally absent so
+        # that a simulated alternative action starts from the same state.
+        fused_features = torch.cat([
+            encoded_metadata, encoded_sleep, pooled_cgm
+        ], dim=1)
 
         fused_features = self.feature_fusion(fused_features)
 
+        if cgm_postprandial is not None:
+            target_len = cgm_postprandial.size(1)
+        else:
+            target_len = min(self.max_future_len, encoded_cgm.size(1))
+        if rollout_horizon is None:
+            rollout_horizon = target_len
+        rollout_horizon = int(rollout_horizon)
+
         # Generate separate diet and exercise future states before the
         # cross-attention fusion and ranking heads described in the manuscript.
-        if self.use_image_features:
-            diet_action = self.diet_action_projection(torch.cat([encoded_food, encoded_images], dim=-1))
+        if diet_action_override is None:
+            if self.use_image_features:
+                diet_action = self.diet_action_projection(torch.cat([encoded_food, encoded_images], dim=-1))
+            else:
+                diet_action = self.diet_action_projection(encoded_food)
         else:
-            diet_action = self.diet_action_projection(encoded_food)
-        exercise_action = self.exercise_action_projection(encoded_exercise)
-        diet_dynamic, diet_trajectory = self.diet_transition(fused_features, diet_action)
-        exercise_dynamic, exercise_trajectory = self.exercise_transition(fused_features, exercise_action)
-        future_state = self.future_state_fusion(diet_trajectory, exercise_trajectory)
+            diet_action = self._coerce_action_override(
+                diet_action_override,
+                self.diet_action_projection,
+                self.diet_action_projection.in_features,
+                "diet_action_override",
+            )
+        if exercise_action_override is None:
+            exercise_action = self.exercise_action_projection(encoded_exercise)
+        else:
+            exercise_action = self._coerce_action_override(
+                exercise_action_override,
+                self.exercise_action_projection,
+                self.exercise_action_projection.in_features,
+                "exercise_action_override",
+            )
+
+        diet_dynamic_steps, diet_trajectory_steps = self.diet_transition.rollout(
+            fused_features, diet_action, horizon=rollout_horizon
+        )
+        exercise_dynamic_steps, exercise_trajectory_steps = self.exercise_transition.rollout(
+            fused_features, exercise_action, horizon=rollout_horizon
+        )
+        diet_dynamic, diet_trajectory = diet_dynamic_steps[:, -1], diet_trajectory_steps[:, -1]
+        exercise_dynamic, exercise_trajectory = (
+            exercise_dynamic_steps[:, -1], exercise_trajectory_steps[:, -1]
+        )
+        # Keep every transition step as decoder memory.  The final state is
+        # retained separately for scalar ranking outputs and backwards
+        # compatible diagnostics.
+        future_rollout = self.future_state_fusion(
+            diet_trajectory_steps, exercise_trajectory_steps
+        )
+        future_state = future_rollout[:, -1]
 
         if cgm_postprandial is not None:
             target_sequence = cgm_postprandial.unsqueeze(-1)
-            predicted_cgm = self.cgm_decoder(encoded_cgm, future_state, target_sequence)
-            target_len = target_sequence.size(1)
+            predicted_cgm = self.cgm_decoder(encoded_cgm, future_rollout, target_sequence)
         else:
-            predicted_cgm = self.cgm_decoder(encoded_cgm, future_state)
+            predicted_cgm = self.cgm_decoder(
+                encoded_cgm, future_rollout, target_len=rollout_horizon
+            )
             target_len = predicted_cgm.size(1)
 
         ranking_glucose, ranking_score = self.ranking_head(future_state, target_len=target_len)
@@ -855,7 +982,121 @@ class CGMPredictionModelWithImage(nn.Module):
                 'diet_trajectory_state': diet_trajectory,
                 'exercise_dynamic_state': exercise_dynamic,
                 'exercise_trajectory_state': exercise_trajectory,
+                'diet_dynamic_rollout': diet_dynamic_steps,
+                'diet_trajectory_rollout': diet_trajectory_steps,
+                'exercise_dynamic_rollout': exercise_dynamic_steps,
+                'exercise_trajectory_rollout': exercise_trajectory_steps,
                 'fused_future_state': future_state,
+                'fused_future_rollout': future_rollout,
             }
 
         return predicted_cgm.squeeze(-1)  # [batch_size, target_len]
+
+    def _coerce_action_override(self, override, projection, raw_dim, name):
+        """Validate and project a counterfactual action embedding.
+
+        A candidate generator can pass either the encoder-space representation
+        (``raw_dim``) or a representation already projected to the transition
+        state size (``cgm_d_model``).  The latter is useful when a caller
+        caches encoded candidates.  A clear shape error is preferable to
+        silently treating malformed candidates as observed actions.
+        """
+        if not isinstance(override, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        if override.dim() not in (2, 3):
+            raise ValueError(f"{name} must have shape [batch, dim] or [batch, steps, dim]")
+        reference = next(projection.parameters(), None)
+        if reference is None:
+            reference = next(self.parameters())
+        override = override.to(device=reference.device, dtype=reference.dtype)
+        last_dim = override.size(-1)
+        if last_dim == raw_dim:
+            flat = override.reshape(-1, last_dim)
+            projected = projection(flat).reshape(*override.shape[:-1], -1)
+            return projected
+        if last_dim == self.cgm_encoder.d_model:
+            return override
+        raise ValueError(
+            f"{name} last dimension {last_dim} does not match raw action dimension "
+            f"{raw_dim} or transition dimension {self.cgm_encoder.d_model}"
+        )
+
+    def simulate_actions(self, *, diet_action=None, exercise_action=None,
+                         rollout_horizon=None, **context):
+        """Simulate alternative diet/exercise actions from one observed state.
+
+        ``context`` accepts the same physiological/text/image arguments as
+        :meth:`forward`.  The returned dictionary contains the predicted CGM
+        trajectory, ranking score and every latent transition step.  This
+        explicit API is what connects candidate generation to auditable
+        what-if comparison; it does not imply that observational data alone
+        identifies causal effects.
+        """
+        context.pop("cgm_postprandial", None)
+        context.pop("diet_action_override", None)
+        context.pop("exercise_action_override", None)
+        context.pop("return_details", None)
+        context["diet_action_override"] = diet_action
+        context["exercise_action_override"] = exercise_action
+        context["rollout_horizon"] = rollout_horizon
+        context["return_details"] = True
+        return self.forward(**context)
+
+    @torch.no_grad()
+    def simulate_counterfactuals(self, context, action_variants, rollout_horizon=None):
+        """Compare several candidate actions from one fixed physiological state.
+
+        ``context`` contains the observed metadata, sleep and pre-event CGM
+        tensors.  Each item in ``action_variants`` may contain ``diet_action``
+        and/or ``exercise_action`` tensors (raw encoder-space or projected
+        transition-space).  An omitted action is held at its observed value,
+        so a diet-only comparison keeps exercise fixed.  Outputs are stacked
+        as ``[batch, candidate, ...]`` for direct ranking and delta analysis.
+        This is learned predictive simulation; causal identification still
+        requires interventionally informative data and assumptions.
+        """
+        if not action_variants:
+            raise ValueError("action_variants must contain at least one candidate")
+        was_training = self.training
+        self.eval()
+        outputs = []
+        try:
+            for variant in action_variants:
+                if not isinstance(variant, dict):
+                    raise TypeError("each action variant must be a dictionary")
+                variant = dict(variant)
+                diet_action = variant.pop("diet_action", variant.pop("diet_action_override", None))
+                exercise_action = variant.pop(
+                    "exercise_action", variant.pop("exercise_action_override", None)
+                )
+                merged_context = dict(context)
+                merged_context.update(variant)
+                outputs.append(
+                    self.simulate_actions(
+                        diet_action=diet_action,
+                        exercise_action=exercise_action,
+                        rollout_horizon=rollout_horizon,
+                        **merged_context,
+                    )
+                )
+        finally:
+            self.train(was_training)
+
+        stack_keys = (
+            "predicted_cgm", "ranking_glucose", "ranking_score",
+            "diet_dynamic_rollout", "diet_trajectory_rollout",
+            "exercise_dynamic_rollout", "exercise_trajectory_rollout",
+            "fused_future_rollout",
+        )
+        result = {
+            key: torch.stack([output[key] for output in outputs], dim=1)
+            for key in stack_keys
+            if key in outputs[0]
+        }
+        # The first candidate is the comparison baseline by convention.  The
+        # deltas make the what-if effect auditable without implying causality.
+        if "predicted_cgm" in result:
+            result["predicted_cgm_delta"] = result["predicted_cgm"] - result["predicted_cgm"][:, :1]
+        if "ranking_score" in result:
+            result["ranking_score_delta"] = result["ranking_score"] - result["ranking_score"][:, :1]
+        return result

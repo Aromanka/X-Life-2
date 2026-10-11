@@ -410,6 +410,16 @@ class CGMPredictionTrainerWithImage:
         self.freeze_action_encoders = config.get(
             'freeze_action_encoders', self.training_phase != 'encoder_pretraining'
         )
+        # A full observed post-CGM window is used by default so the latent
+        # transition is trained as a multi-step rollout.  Set an integer to
+        # intentionally train/evaluate a shorter horizon.
+        self.rollout_horizon = config.get('rollout_horizon', None)
+        # The ranking head's glucose trajectory is an auxiliary supervised
+        # target.  Its scalar preference score still requires preference pairs
+        # and is updated by preference_alignment_step().
+        self.ranking_glucose_loss_weight = float(
+            config.get('ranking_glucose_loss_weight', 0.25)
+        )
 
         # Training parameters
         self.early_stopping_patience = config['early_stopping_patience']
@@ -703,6 +713,8 @@ class CGMPredictionTrainerWithImage:
             (getattr(self.model, 'image_encoder', None), self.learning_rate * 0.1),
             (self.model.cgm_encoder, self.learning_rate),
             (self.model.feature_fusion, self.learning_rate),
+            (getattr(self.model, 'diet_action_projection', None), self.learning_rate * 0.5),
+            (getattr(self.model, 'exercise_action_projection', None), self.learning_rate * 0.5),
             (self.model.cgm_decoder, self.learning_rate),
             (getattr(self.model, 'diet_transition', None), self.learning_rate),
             (getattr(self.model, 'exercise_transition', None), self.learning_rate),
@@ -729,7 +741,8 @@ class CGMPredictionTrainerWithImage:
         """Set trainable modules for the three manuscript training phases.
 
         ``encoder_pretraining`` trains the diet/exercise action encoders;
-        ``world_model`` freezes them and trains transitions/decoders; the
+        ``world_model`` freezes the large text/image encoders, trains their
+        action-projection adapters and transitions/decoders; the
         alignment phases keep the action encoders frozen and train the
         transition/ranking parameters.  The method is intentionally explicit
         so callers can inspect ``requires_grad`` before starting a run.
@@ -744,13 +757,21 @@ class CGMPredictionTrainerWithImage:
         if phase == 'encoder_pretraining' or (
             phase == 'world_model' and not self.freeze_action_encoders
         ):
-            for module in (self.model.text_encoder, getattr(self.model, 'image_encoder', None)):
+            for module in (
+                self.model.text_encoder,
+                getattr(self.model, 'image_encoder', None),
+                getattr(self.model, 'diet_action_projection', None),
+                getattr(self.model, 'exercise_action_projection', None),
+            ):
                 if module is not None:
                     for parameter in module.parameters():
                         parameter.requires_grad = True
         else:
             train_modules = [
-                self.model.cgm_encoder, self.model.feature_fusion, self.model.cgm_decoder,
+                self.model.cgm_encoder, self.model.feature_fusion,
+                getattr(self.model, 'diet_action_projection', None),
+                getattr(self.model, 'exercise_action_projection', None),
+                self.model.cgm_decoder,
                 getattr(self.model, 'diet_transition', None),
                 getattr(self.model, 'exercise_transition', None),
                 getattr(self.model, 'future_state_fusion', None),
@@ -804,7 +825,7 @@ class CGMPredictionTrainerWithImage:
             cgm_preprandial_mask = batch['cgm_preprandial_mask'].to(self.device)
             cgm_postprandial_mask = batch['cgm_postprandial_mask'].to(self.device)
 
-            predicted_cgm = self.model(
+            details = self.model(
                 metadata_input_ids=metadata_input_ids,
                 metadata_attention_mask=metadata_attention_mask,
                 sleep_input_ids=sleep_input_ids,
@@ -817,9 +838,16 @@ class CGMPredictionTrainerWithImage:
                 cgm_postprandial=cgm_postprandial,
                 food_images=food_images,
                 cgm_preprandial_mask=cgm_preprandial_mask,
+                rollout_horizon=self.rollout_horizon,
+                return_details=True,
             )
+            predicted_cgm = details['predicted_cgm']
 
             loss = self._masked_mse(predicted_cgm, cgm_postprandial, cgm_postprandial_mask)
+            if self.ranking_glucose_loss_weight > 0:
+                loss = loss + self.ranking_glucose_loss_weight * self._masked_mse(
+                    details['ranking_glucose'], cgm_postprandial, cgm_postprandial_mask
+                )
 
             loss = loss / self.gradient_accumulation_steps
             loss.backward()
@@ -879,6 +907,13 @@ class CGMPredictionTrainerWithImage:
         self.optimizer.step()
         return loss.detach()
 
+    @torch.no_grad()
+    def simulate_counterfactuals(self, context, action_variants, rollout_horizon=None):
+        """Expose the model's same-state what-if comparison to callers."""
+        return self.model.simulate_counterfactuals(
+            context, action_variants, rollout_horizon=rollout_horizon
+        )
+
     def validate_epoch(self):
         """Validate one epoch"""
         self.model.eval()
@@ -922,6 +957,7 @@ class CGMPredictionTrainerWithImage:
                     cgm_postprandial=None,
                     food_images=food_images,
                     cgm_preprandial_mask=cgm_preprandial_mask,
+                    rollout_horizon=self.rollout_horizon,
                 )
 
                 loss = self._masked_mse(predicted_cgm, cgm_postprandial, cgm_postprandial_mask)
@@ -981,7 +1017,9 @@ class CGMPredictionTrainerWithImage:
                 'early_stopping_patience': self.early_stopping_patience,
                 'weight_decay': self.weight_decay,
                 'gradient_clip_norm': self.gradient_clip_norm,
-                'gradient_accumulation_steps': self.gradient_accumulation_steps
+                'gradient_accumulation_steps': self.gradient_accumulation_steps,
+                'rollout_horizon': self.rollout_horizon,
+                'ranking_glucose_loss_weight': self.ranking_glucose_loss_weight,
             },
             'model_architecture': {
                 'text_hidden_dim': self.text_hidden_dim,

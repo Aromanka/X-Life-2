@@ -204,7 +204,7 @@ For detailed prompt sample of prescription generation, prescription assessment a
 
 ### 2. 🧠 Diet/Exercise Sub-world model and Ranking Module
 
-Diet/Exercise sub-world models predict latent metabolic states for diet and exercise candidates. The public model now exposes separate action-conditioned transition modules with trajectory and dynamics branches, cross-attention fusion, a future glucose head, and a quantitative `ranking_score` output.
+Diet/Exercise sub-world models predict latent metabolic states for diet and exercise candidates. The reference implementation keeps the physiological state (metadata, sleep and pre-event CGM) separate from the diet/exercise action encoders, rolls each action-conditioned transition forward over the observed horizon, fuses the two latent trajectories, and decodes the future CGM sequence. This is the executable form of the manuscript's learned dynamics path; it is a learned predictive model, not proof of a causal intervention effect.
 
 1. Data Preparation.
 Prepare the user metadata and physiological trajectory in the following format:
@@ -260,7 +260,7 @@ The bundled minimal dataset is under `./minimal_dataset/`. It contains the curre
 ```bash
 vim world_model+ranking_module/model_config.py
 ```
-3.Training. The `train()` entry point supports the manuscript's explicit training phases through `training_phase`: `encoder_pretraining`, `world_model`, `preference_alignment`, and `participant_update`. The world-model phase freezes the action encoders and trains transition, fusion, decoder and ranking modules. Data splitting is participant-level with five reproducible seeds; all samples from a participant stay in one partition. `split_index` selects one recorded split; running and aggregating all five splits remains an experiment-level step. CGM padding is tracked with validity masks and excluded from loss and metrics. The bundled `minimal_dataset` contains three participants and is a format/smoke-test fixture with only two meals and two exercise events; it is not a statistically meaningful training cohort. The checked-in `main.py` uses the `default` research configuration, which may download Qwen3-8B and Qwen2.5-VL-72B weights; edit the `get_training_config(...)` and path assignments in `main.py` to select another configuration or dataset. Users can change `image_dir`, `data_path`, `save_dir` and the desired training phase before running. From the repository root:
+3.Training. The `train()` entry point exposes the manuscript phase names through `training_phase`: `encoder_pretraining`, `world_model`, `preference_alignment`, and `participant_update`. The default world-model objective freezes the large text/image encoders, trains their action-projection adapters plus the transition/fusion/decoder modules, rolls the latent transition across the measured post-CGM window, and combines masked future-CGM loss with an auxiliary loss on the ranking head's predicted glucose trajectory. The scalar `ranking_score` has no meaning until preference or physiological utility targets are supplied through the alignment interface; it is not learned from safety scores. The phase switch controls which modules are trainable, but the manuscript's dedicated encoder-label and omics auxiliary datasets are not bundled here. Data splitting is participant-level with five reproducible seeds; all samples from a participant stay in one partition. `split_index` selects one recorded split; running and aggregating all five splits remains an experiment-level step. CGM padding is tracked with validity masks and excluded from loss and metrics. The bundled `minimal_dataset` contains three participants and is a format/smoke-test fixture with only two meals and two exercise events; it is not a statistically meaningful training cohort. The checked-in `main.py` uses the `default` research configuration, which may download Qwen3-8B and Qwen2.5-VL-72B weights; edit the `get_training_config(...)` and path assignments in `main.py` to select another configuration or dataset. Users can change `image_dir`, `data_path`, `save_dir` and the desired training phase before running. From the repository root:
 ```bash
 cd world_model+ranking_module
 python main.py
@@ -274,9 +274,34 @@ python main.py
 
 5.Multi-stage alignment. `CGMPredictionTrainerWithImage.dpo_loss()` implements the score-margin objective for preferred/rejected prescriptions from the same participant state, with an optional frozen reference-model margin. The public sample dataset does not contain preference pairs, so preference alignment requires a project-specific dataset and caller that supplies those pairs; the helper does not treat safety scores as learned preference scores.
 
+What-if simulation. `CGMPredictionModelWithImage.simulate_counterfactuals()` holds one physiological context fixed and evaluates several encoded diet/exercise alternatives. Each result contains a predicted CGM trajectory, the latent transition rollout and the ranking outputs, stacked as `[batch, candidate, ...]` so candidates can be compared before an action is taken:
+```python
+context = {
+    # The same metadata, sleep, pre-event CGM and masks for one patient state.
+    "metadata_input_ids": metadata_ids,
+    "metadata_attention_mask": metadata_mask,
+    "sleep_input_ids": sleep_ids,
+    "sleep_attention_mask": sleep_mask,
+    "food_input_ids": factual_food_ids,
+    "food_attention_mask": factual_food_mask,
+    "exercise_input_ids": exercise_ids,
+    "exercise_attention_mask": exercise_mask,
+    "cgm_preprandial": cgm_pre,
+    "cgm_preprandial_mask": cgm_pre_mask,
+    "food_images": factual_images,
+}
+result = model.simulate_counterfactuals(
+    context,
+    [{"diet_action": encoded_diet_a}, {"diet_action": encoded_diet_b}],
+    rollout_horizon=32,
+)
+# result["predicted_cgm"] has shape [batch, candidate, horizon].
+```
+An omitted diet or exercise override is held at its observed value. Candidate embeddings may be raw action-encoder representations or already projected transition vectors. The interface supports model-based counterfactual comparison under the learned transition assumptions; observational data alone do not identify a causal effect. A paper-faithful unseen-action claim therefore requires larger longitudinal/interventional coverage and held-out action-combination evaluation.
+
 When a trained world model is available, inject a callable as `world_model_scorer` into `DietPipeline` or `ExercisePipeline` (or pass it to `generate`). The pipeline first removes candidates with `is_safe=False`, then stores the learned value as `_ranking_score` and ranks only the remaining candidates. Without an injected scorer, it uses the safety score as an explicit fallback and does not claim to have learned a physiological ranking.
 
-The transition, trajectory, dynamics, fusion, ranking, training-phase and DPO additions provide stable interfaces and a small differentiable reference path for integration tests. They are not a claim that the paper's unpublished losses, checkpoints or preference data have been reconstructed. Exact CGM patch settings, auxiliary omics decoders, encoder-pretraining labels, preference-pair construction/reference checkpoints, and the participant-update data contract still need to be supplied for a paper-faithful reproduction.
+The transition, trajectory, autoregressive rollout, fusion, ranking, training-phase and DPO additions provide a differentiable reference path for integration tests. They are not a claim that the paper's unpublished checkpoints, full auxiliary losses or preference data have been reconstructed. Exact CGM patch settings, auxiliary omics decoders, supervised encoder-pretraining labels, preference-pair construction/reference checkpoints, and the participant-update data contract still need to be supplied for a paper-faithful reproduction.
 
 
 ### 3. 🛡️ Safety Module
