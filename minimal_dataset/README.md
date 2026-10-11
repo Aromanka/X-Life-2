@@ -32,4 +32,4 @@ The repository's `SampleImageDataset` reads the two `meals` entries and can reso
 
 ## Review before publication
 
-This package has not been uploaded to GitHub. Confirm the cohort's permission to release individual photos and trajectories. The `P003` app-to-CGM identity link is based on unique name plus matching age because the app account lacks a phone number; confirm it before public release. Clinical duration, complications, specific medication names, and prior hypoglycemia history are unavailable and were left null rather than inferred.
+This package is included in the repository as a code-verification fixture. Before using it in a journal supplement or other public release, confirm the cohort's permission to release individual photos and trajectories. The `P003` app-to-CGM identity link is based on unique name plus matching age because the app account lacks a phone number; confirm it before any broader release. Clinical duration, complications, specific medication names, and prior hypoglycemia history are unavailable and were left null rather than inferred.

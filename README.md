@@ -244,7 +244,7 @@ Prepare the user metadata and physiological trajectory in the following format:
       }
 ]
 ```
-We also prepare the minimal dataset in `./world_model+ranking_module/data`. `sample_data.json` includes metadata, diet information, exercise information, sleep information and CGM records. Image files are optional; the public example uses the CNN backup when the referenced meal image is unavailable.
+The bundled minimal dataset is under `./minimal_dataset/`. It contains the current de-identified review fixture: three pseudonymous participants, two meals, two exercise events, two nocturnal windows, four meal photos and the corresponding observed CGM trajectories. `SampleImageDataset` reads meal photos from `minimal_dataset/images/` and also converts top-level `exercise_events` with CGM windows into standalone exercise samples. The bundle is a format and smoke-test fixture; it is not sufficient for model training, which requires at least two participants and a project-specific training split.
 
 2.Model config. In `world_model+ranking_module/model_config.py`, the default research configuration resolves to `Qwen/Qwen3-8B` for text features and `Qwen/Qwen2.5-VL-72B-Instruct` for the diet image-language encoder. The download helpers accept the selected configuration and pass the resolved local paths through to the model. The `cnn-backup` vision option is intended for lightweight verification and is not the research model.
 ```bash
@@ -400,7 +400,20 @@ Alternatively, you can create a ScriptableObject config in Unity Editor:
 
 ## 📊 Minimal Dataset
 
-A minimal, de-identified sample dataset containing representative CGM traces and structured lifestyle logs is available at `./world_model+ranking_module/data`. The sample is specifically formatted for computational compatibility with the X-Life preprocessing and modeling pipelines, enabling code verification and functional demonstration. It is intended exclusively for testing and development purposes. 
+The current de-identified minimal dataset is available at [`./minimal_dataset/`](./minimal_dataset/). It contains three pseudonymous participants and the following observed records:
+
+- 2 meals, including four meal photographs and pre/post-meal CGM windows;
+- 2 exercise events, including observed post-event CGM windows;
+- 2 nocturnal windows with rule-derived positive/negative hypoglycemia labels;
+- `manifest.json` with event counts and SHA-256 hashes for the bundled images.
+
+The JSON bundle keeps the repository's patient-level layout (`subject_id`, `metadata`, `meals`, and `nocturnal_hypoglycemia`) and adds top-level `exercise_events` plus explicit CGM windows. `recorded_at` is a proxy event time; it is not a verified first-bite or exercise-start time. Night labels are rule-derived CGM labels, not clinician-adjudicated diagnoses. The bundled photographs and trajectories are provided for code verification and functional demonstration, subject to the release permissions documented in [`minimal_dataset/README.md`](./minimal_dataset/README.md).
+
+Validate the bundle from the repository root with:
+
+```bash
+python3 minimal_dataset/validate_bundle.py
+```
 
 ## 📄 License
 
