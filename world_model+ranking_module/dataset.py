@@ -345,8 +345,12 @@ class SampleImageDataset(Dataset):
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize dataset
-    dataset = SampleImageDataset('/data/home/qinyiming/X-life3/data/sample_data.json')
+    # Initialize the repository's bundled minimal fixture.  Resolve paths
+    # relative to this file rather than relying on a machine-specific path.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    data_path = os.path.join(repo_root, 'minimal_dataset', 'sample_data.json')
+    image_dir = os.path.join(repo_root, 'minimal_dataset', 'images')
+    dataset = SampleImageDataset(data_path, image_dir=image_dir)
     
     # Print dataset size
     print(f"Dataset size: {len(dataset)}")

@@ -6,10 +6,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch 2.6](https://img.shields.io/badge/PyTorch-2.7-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![PyTorch 2.7](https://img.shields.io/badge/PyTorch-2.7-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![Unity 2022.3](https://img.shields.io/badge/Unity-2022.3.x-000000?logo=unity&logoColor=white)](https://unity.com/)
-[![Paper](https://img.shields.io/badge/Paper-Read_Manuscript-success)](placeholder)
-[![BibTeX](https://img.shields.io/badge/BibTeX-Citation-lightgrey)](#citation)
+[![Citation](https://img.shields.io/badge/Citation-CITATION.cff-lightgrey)](./CITATION.cff)
 
 <p align="center">
   <strong>X-Life</strong> is a metabolic world-model system for adaptive lifestyle medicine that translates continuous physiological data and sensing into personalised, quantitative dietary and postprandial activity prescriptions, concurrently meeting individual lifestyle preferences, contextual settings and safety constraints.
@@ -54,7 +53,7 @@
 
 ## 🌟 Overview
 
-This repository contains the code, packages, and sample dataset for the paper **"A metabolic world model system for personalised lifestyle medicine"**.
+This repository contains the Python code and sample dataset for the paper **"A metabolic world model system for personalised lifestyle medicine"**. The Unity AR client is distributed separately as the external `XLIFE-AR.zip` archive described below.
 
 
 ## 🚀 Quick Start
@@ -63,7 +62,7 @@ This repository contains the code, packages, and sample dataset for the paper **
 
 #### Software Dependencies
 - **Python**: 3.10+
-- **PyTorch**: 2.6+
+- **PyTorch**: 2.7.0
 - **JDK**: 17.0.18+
 - **Unity3D**: 2022.3.x
 - **Neo4j**: 5.26.21+
@@ -76,8 +75,8 @@ This repository contains the code, packages, and sample dataset for the paper **
 
 #### 1. Clone the Repository
 ```bash
-git clone https://github.com/2025XLife/Project-01.git
-cd Project-01
+git clone https://github.com/LittleQBerry/X-Life.git
+cd X-Life
 ```
 
 #### 2. Create Python Environment
@@ -95,12 +94,12 @@ pip install -r requirements.txt
 #### 4. Install Neo4j Service
 ```bash
 # Install JDK
-sudo apt install openjdk-11-jdk
+sudo apt install openjdk-17-jdk
 # Verify JDK version
 java -version
 ```
 
-Download the latest Neo4j tarball from [Neo4j Deployment Center](https://neo4j.com/deployment-center/?gdb-selfmanaged) and start the service:
+Download the Neo4j Community 5.26.21 tarball from the [Neo4j Deployment Center](https://neo4j.com/deployment-center/?gdb-selfmanaged) and start the service:
 ```bash
 tar zxf neo4j-community-5.26.21-unix.tar.gz
 cd neo4j-community-5.26.21/bin/
@@ -117,7 +116,7 @@ The knowledge-graph-guided lifestyle prescription generation module generates pe
 #### Configuration Steps
 
 **1. Configure Database and Models**
-Configure Neo4j database, remote LLM API, and local models in `./kg_module/config.json`:
+Configure Neo4j database, the remote LLM API, and optional local model paths in `./kg_agents/config.json`:
 
 ```json
 {
@@ -139,20 +138,20 @@ Configure Neo4j database, remote LLM API, and local models in `./kg_module/confi
 **2. Prepare Guidelines**
 Prepare guidelines following the descriptions in our paper:
 ```
-.
-├── data/
-│   ├── diet/
-│   │   ├── diet_guideline_1.pdf
-│   │   └── ...
-│   └── exercise/
-│       ├── exercise_guideline_1.pdf
-│       └── ...
+kg_agents/
+└── data/
+    ├── diet/
+    │   ├── diet_guideline_1.pdf
+    │   └── ...
+    └── exer/
+        ├── exercise_guideline_1.pdf
+        └── ...
 ```
 
 **3. Extract and Embed Entities**
 Make sure the Neo4j server has started:
 ```bash
-cd kg_module
+cd kg_agents
 # Extract knowledge from ./data
 python -m core.build_kg
 # Import knowledge graph
@@ -165,6 +164,8 @@ python -m core.embed_kg
 
 **Generation and Assessment Pipelines**
 ```bash
+# Run these commands from the repository root.
+cd kg_agents
 # Test diet prescription pipeline
 python -m pipeline.diet_pipeline --bn 1 --vn 5 --query "I want a sandwich with just veggies, no meat." --use_vector --rag_topk 5
 # Test exercise prescription pipeline
@@ -173,6 +174,7 @@ python -m pipeline.exer_pipeline --bn 1 --vn 4 --query "I want to do some back e
 
 **Start Flask Service**
 ```bash
+cd kg_agents
 python server.py
 ```
 
@@ -181,20 +183,20 @@ python server.py
 # Diet prescription generation
 curl -X POST http://localhost:5000/api/v1/diet/generate-only \
   -H "Content-Type: application/json" \
-  -d '{args}'
+  -d '{"user_metadata":{},"user_requirement":{},"user_query":"a balanced lunch"}'
 
 # Exercise prescription generation
 curl -X POST http://localhost:5000/api/v1/exercise/generate-only \
   -H "Content-Type: application/json" \
-  -d '{args}'
+  -d '{"user_metadata":{},"user_requirement":{},"user_query":"a moderate walk"}'
 
 # Safety module assess prescription
 curl -X POST http://localhost:5000/api/v1/safety/evaluate \
   -H "Content-Type: application/json" \
   -d '{
-    "plan_type": "diet/exercise",
-    "user_metadata": {detailed_metadata},
-    "plan": {plan_to_assess}
+    "plan_type": "diet",
+    "user_metadata": {},
+    "plan": {}
   }'
 ```
 
@@ -223,7 +225,7 @@ Prepare the user metadata and physiological trajectory in the following format:
                 "time":,
                 "food_items": [
                   {
-                    "img_names": 
+                    "img_names":
                   }
                 ]
               }
@@ -232,6 +234,14 @@ Prepare the user metadata and physiological trajectory in the following format:
             "cgm_preprandial": [],
             "cgm_postprandial": [],
             "sleep_data": {}
+          }
+        ],
+        "exercise_events": [
+          {
+            "event_id": "exercise_001",
+            "recorded_at": "YYYY-MM-DDTHH:MM:SS",
+            "cgm_pre_exercise": [],
+            "cgm_post_exercise": []
           }
         ],
         "nocturnal_hypoglycemia": [
@@ -244,19 +254,21 @@ Prepare the user metadata and physiological trajectory in the following format:
       }
 ]
 ```
-The bundled minimal dataset is under `./minimal_dataset/`. It contains the current de-identified review fixture: three pseudonymous participants, two meals, two exercise events, two nocturnal windows, four meal photos and the corresponding observed CGM trajectories. `SampleImageDataset` reads meal photos from `minimal_dataset/images/` and also converts top-level `exercise_events` with CGM windows into standalone exercise samples. The bundle is a format and smoke-test fixture; it is not sufficient for model training, which requires at least two participants and a project-specific training split.
+The bundled minimal dataset is under `./minimal_dataset/`. It contains the current de-identified review fixture: three pseudonymous participants, two meals, two exercise events, two nocturnal windows, four meal photos and the corresponding observed CGM trajectories. `SampleImageDataset` reads meal photos from `minimal_dataset/images/` and also converts top-level `exercise_events` with CGM windows into standalone exercise samples. The raw meal/exercise windows contain 12 pre-event and 36 post-event readings; the current model example uses a fixed 32-point target length (`max_future_len=32`), so the raw JSON retains more post-event points than the default model input. The bundle is a format and smoke-test fixture; it is not sufficient for model training, which requires at least two participants and a project-specific training split.
 
 2.Model config. In `world_model+ranking_module/model_config.py`, the default research configuration resolves to `Qwen/Qwen3-8B` for text features and `Qwen/Qwen2.5-VL-72B-Instruct` for the diet image-language encoder. The download helpers accept the selected configuration and pass the resolved local paths through to the model. The `cnn-backup` vision option is intended for lightweight verification and is not the research model.
 ```bash
 vim world_model+ranking_module/model_config.py
 ```
-3.Training. The `train()` entry point supports the manuscript's explicit training phases through `training_phase`: `encoder_pretraining`, `world_model`, `preference_alignment`, and `participant_update`. The world-model phase freezes the action encoders and trains transition, fusion, decoder and ranking modules. Data splitting is participant-level with five reproducible seeds; all meals from a participant stay in one partition. `split_index` selects one recorded split; running and aggregating all five splits remains an experiment-level step. CGM padding is tracked with validity masks and excluded from loss and metrics. The bundled sample has one participant and is only a format/smoke-test fixture; training requires a dataset with at least two participants. Users are required to set `image_dir`, `data_path`, `save_dir` and the desired training phase before running:
+3.Training. The `train()` entry point supports the manuscript's explicit training phases through `training_phase`: `encoder_pretraining`, `world_model`, `preference_alignment`, and `participant_update`. The world-model phase freezes the action encoders and trains transition, fusion, decoder and ranking modules. Data splitting is participant-level with five reproducible seeds; all samples from a participant stay in one partition. `split_index` selects one recorded split; running and aggregating all five splits remains an experiment-level step. CGM padding is tracked with validity masks and excluded from loss and metrics. The bundled `minimal_dataset` contains three participants and is a format/smoke-test fixture with only two meals and two exercise events; it is not a statistically meaningful training cohort. The checked-in `main.py` uses the `default` research configuration, which may download Qwen3-8B and Qwen2.5-VL-72B weights; edit the `get_training_config(...)` and path assignments in `main.py` to select another configuration or dataset. Users can change `image_dir`, `data_path`, `save_dir` and the desired training phase before running. From the repository root:
 ```bash
+cd world_model+ranking_module
 python main.py
 ```
 
-4.Evaluation. After training is completed, the model can be evaluated by switching it to `trainer.evaluate()`. The model will output the predicted CGM values along with the corresponding evaluation metrics. The code is shown below: 
+4.Evaluation. `python main.py` runs training and then calls `trainer.evaluate()` on the validation split; it is not a checkpoint-only evaluation command. A caller that constructs `CGMPredictionTrainerWithImage` with a saved `model_path` can call `trainer.evaluate()` directly to evaluate an existing checkpoint. The evaluation returns predicted CGM values plus MSE, MAE, RMSE, R² and Pearson metrics.
 ```bash
+cd world_model+ranking_module
 python main.py
 ```
 
@@ -269,13 +281,13 @@ The transition, trajectory, dynamics, fusion, ranking, training-phase and DPO ad
 
 ### 3. 🛡️ Safety Module
 
-A safety module based on retrieval-augmented generation is designed to enforce safety constraints and reduce hallucination risk of lifestyle prescriptions. We use [Qwen3-8B](https://huggingface.co/collections/Qwen/qwen3) as the backbone. The designed system prompt is in  [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
+A safety module based on retrieval-augmented generation is designed to enforce safety constraints and reduce hallucination risk of lifestyle prescriptions. The runtime model is the API model configured in `kg_agents/config.json`; Qwen3-8B is the manuscript reference model rather than a hard-coded dependency. The designed system prompt is in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
 
 ### 4. 🧬 Multi-omics Model
 
-The model supports multi-omics-based glucose prediction. The command to run it is as follows:
+The model supports multi-omics-based glucose prediction. From the repository root, run:
 ```bash
-python train_omics_modality_models.py \
+python omics_model/train_omics_modality_models.py \
   --labels labels.csv \
   --covariates covariates.csv \
   --metagenome metagenome.csv \
@@ -298,7 +310,7 @@ python train_omics_modality_models.py \
 
 ### 5. 🥽 AR Deployment
 
-This Unity project targets **XREAL AR** devices to:
+The external Unity project targets **XREAL AR** devices to:
 - Embed a web page as the main UI via **Vuplex 3D WebView** (WebView scene)
 - Trigger **XREAL RGB Camera** capture / screen recording from the web page (camera capture scene)
 - Send capture results (photos/videos, local file paths / local HTTP URLs, etc.) back to the web page via `postMessage`
@@ -319,6 +331,8 @@ This Unity project targets **XREAL AR** devices to:
 
 #### Dependencies
 
+The Python/Neo4j modules in this repository are separate from the Unity client. The Unity project is distributed as the external `XLIFE-AR.zip` archive linked below; Unity `Assets/`, `Packages/`, and `ProjectSettings/` are not included in this repository.
+
 > The two most common blockers are: **Vuplex (commercial, not included in the repo)** + **XREAL XR Plugin (provided as a local tar package)**.
 
 ##### A. Vuplex 3D WebView (Required, Not Included)
@@ -327,10 +341,10 @@ This Unity project targets **XREAL AR** devices to:
 - After importing, you should see: `Assets/Vuplex/WebView/...`, and be able to use `CanvasWebViewPrefab` in scenes
 - Note: if you want to run WebView directly in the macOS/Windows Editor, you may need to install the native plugins for those platforms per Vuplex docs; building for Android only is fine
 
-##### B. XREAL XR Plugin (Required, Already Configured)
+##### B. XREAL XR Plugin (Required, Provided in the External Unity Archive)
 
-- Included in this project: `Packages/com.xreal.xr.tar.gz`
-- `Packages/manifest.json` references the local package: `"com.xreal.xr": "@com.xreal.xr.tar.gz"`
+- Included in the external `XLIFE-AR.zip` archive: `Packages/com.xreal.xr.tar.gz`
+- The external Unity project's `Packages/manifest.json` references the local package: `"com.xreal.xr": "@com.xreal.xr.tar.gz"`
 - To upgrade the plugin: replace `Packages/com.xreal.xr.tar.gz` and keep the `manifest.json` reference consistent
 
 ##### C. Unity Package Manager Dependencies (Auto-installed)
@@ -418,4 +432,3 @@ python3 minimal_dataset/validate_bundle.py
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-$$

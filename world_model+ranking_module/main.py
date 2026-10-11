@@ -520,8 +520,9 @@ class CGMPredictionTrainerWithImage:
         if len(unique_subjects) < 2:
             raise ValueError(
                 "Participant-level 80/20 validation requires at least two "
-                "participants. The bundled sample dataset has one; provide "
-                "the project participant dataset before training."
+                "participants. The bundled minimal fixture is a smoke-test "
+                "dataset; provide a larger project participant dataset for "
+                "meaningful training."
             )
         split_seeds = getattr(self, 'split_seeds', [42, 43, 44, 45, 46])
         all_splits = self._participant_level_splits(
@@ -1401,16 +1402,16 @@ def main():
     else:
         config = get_training_config('debug')  # Can be changed to 'debug' or 'production'
 
-    # Add image-related configuration
-    if not use_new_config:
-        config['use_image_features'] = True
-        config['image_dir'] = './data'  # Image directory
-
-    # Add data path and save directory
-    config['data_path'] = './data/sample_data.json'
-    if 'image_dir' not in config:
-        config['image_dir'] = './data'
-    config['save_dir'] = '.checkpoints/cgm_prediction_models_with_image'
+    # Keep the runnable example tied to the repository's current public
+    # fixture.  Resolve paths from this file so ``python main.py`` works
+    # whether it is launched from the repository root or this directory.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    default_data_path = os.path.join(repo_root, 'minimal_dataset', 'sample_data.json')
+    default_image_dir = os.path.join(repo_root, 'minimal_dataset', 'images')
+    config.setdefault('use_image_features', True)
+    config.setdefault('data_path', default_data_path)
+    config.setdefault('image_dir', default_image_dir)
+    config.setdefault('save_dir', os.path.join(repo_root, '.checkpoints', 'cgm_prediction_models_with_image'))
 
     # Create trainer
     trainer = CGMPredictionTrainerWithImage(config)
