@@ -1,6 +1,6 @@
-# XLife minimal test dataset — 2025 summer cohort
+# XLife minimal test dataset
 
-This is a **local review package** prepared from the 2025 summer cohort. It contains 3 pseudonymous participants and 6 observed event windows: 2 meals, 2 exercise records, and 2 nights. The four meal photos were selected from `F:\XLife图像.zip` by exact archived filename and account folder. Each photo was visually checked against its recorded food names.
+It contains 3 pseudonymous participants and 6 observed event windows: 2 meals, 2 exercise records, and 2 nights. 
 
 ## Contents
 
