@@ -1,11 +1,11 @@
 from typing import List, Dict, Any, Optional
 from neo4j import GraphDatabase
-from config_loader import NEO4J_URI, NEO4J_AUTH, get_config
+from config_loader import get_neo4j_config
 
 
 def get_driver():
     """Get Neo4j driver instance"""
-    neo4j_config = get_config()["neo4j"]
+    neo4j_config = get_neo4j_config()
     return GraphDatabase.driver(
         neo4j_config["uri"],
         auth=(neo4j_config["username"], neo4j_config["password"])
@@ -162,5 +162,10 @@ def get_neo4j() -> Neo4jClient:
     return _neo4j_client
 
 
-# compatible with old code driver instance
-driver = get_driver()
+# Retain the legacy driver interface without configuration or I/O at import.
+class _LazyDriver:
+    def __getattr__(self, name):
+        return getattr(get_neo4j().driver, name)
+
+
+driver = _LazyDriver()

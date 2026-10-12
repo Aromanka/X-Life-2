@@ -3,21 +3,20 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
-from config_loader import get_config
+from config_loader import get_config, get_deepseek_config
 from core.llm.utils import parse_messages_to_str, parse_response_to_str
 
 
 def get_llm_client() -> OpenAI:
     config = get_config()
     return OpenAI(
-        api_key=config["api_model"]["api_key"],
-        base_url=config["api_model"]["base_url"]
+        api_key=get_deepseek_config()["api_key"],
+        base_url=get_deepseek_config()["base_url"]
     )
 
 
 def get_model_name() -> str:
-    config = get_config()
-    return config.get("api_model", {}).get("model", "deepseek-chat")
+    return get_deepseek_config().get("model", "DeepSeek-R1")
 
 
 class LLMClient:

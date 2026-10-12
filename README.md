@@ -39,7 +39,7 @@
     - [Software Environment](#software-environment)
     - [Dependencies](#dependencies)
       - [A. Vuplex 3D WebView (Required, Not Included)](#a-vuplex-3d-webview-required-not-included)
-      - [B. XREAL XR Plugin (Required, Already Configured)](#b-xreal-xr-plugin-required-already-configured)
+      - [B. XREAL XR Plugin (Required, Provided in the External Unity Archive)](#b-xreal-xr-plugin-required-provided-in-the-external-unity-archive)
       - [C. Unity Package Manager Dependencies (Auto-installed)](#c-unity-package-manager-dependencies-auto-installed)
     - [Project Setup](#project-setup)
       - [4.1 Configure the WebView Initial URL](#41-configure-the-webview-initial-url)
@@ -75,7 +75,7 @@ This repository contains the Python code and sample dataset for the paper **"A m
 
 #### 1. Clone the Repository
 ```bash
-git clone --branch fix/xlife-audit-11-items https://github.com/LittleQBerry/X-Life.git
+git clone https://github.com/LittleQBerry/X-Life.git
 cd X-Life
 ```
 
@@ -116,7 +116,14 @@ The knowledge-graph-guided lifestyle prescription generation module generates pe
 #### Configuration Steps
 
 **1. Configure Database and Models**
-Configure Neo4j database, the remote LLM API, and optional local model paths in `./kg_agents/config.json`:
+Install the agent dependencies and copy the configuration template:
+
+```bash
+pip install -r requirements-agents.txt
+cp kg_agents/config.example.json kg_agents/config.json
+```
+
+Configure the Neo4j database, local DeepSeek-R1 service and model paths in `./kg_agents/config.json`:
 
 ```json
 {
@@ -126,12 +133,17 @@ Configure Neo4j database, the remote LLM API, and optional local model paths in 
         "password": "your_password"
     },
     "api_model": {
-        "api_key": "your_api_key",
-        "base_url": "your_base_url",
-        "model": "your_api_model"
+        "api_key": "local",
+        "base_url": "http://localhost:8000/v1",
+        "model": "DeepSeek-R1"
     },
-    "local_model_path": "your_local_LLM_path",
-    "local_emb_path": "your_local_embedding_model_path"
+    "local_model_path": "",
+    "local_emb_path": "your_local_embedding_model_path",
+    "world_model": {
+        "checkpoint_path": "outputs/user/inference.pt",
+        "config_path": "configs/local.json",
+        "device": "auto"
+    }
 }
 ```
 
@@ -153,7 +165,7 @@ Make sure the Neo4j server has started:
 ```bash
 cd kg_agents
 # Extract knowledge from ./data
-python -m core.build_kg
+python -m core.build_kg_2_steps
 # Import knowledge graph
 python -m core.import_kg
 # (Optional) Embedding knowledge graph
@@ -173,6 +185,9 @@ python -m pipeline.exer_pipeline --bn 1 --vn 4 --query "I want to do some back e
 ```
 
 **Start Flask Service**
+
+Set `world_model.checkpoint_path` to the trained ranking checkpoint. For `/diet/generate` and `/exercise/generate`, include the current event as `world_model_context` with `subject_id`, `metadata`, `sleep_data` and `cgm_pre`.
+
 ```bash
 cd kg_agents
 python server.py
@@ -204,134 +219,62 @@ For detailed prompt sample of prescription generation, prescription assessment a
 
 ### 2. 🧠 Diet/Exercise Sub-world model and Ranking Module
 
-Diet/Exercise sub-world models predict latent metabolic states for diet and exercise candidates. The reference implementation keeps the physiological state (metadata, sleep and pre-event CGM) separate from the diet/exercise action encoders, rolls each action-conditioned transition forward over the observed horizon, fuses the two latent trajectories, and decodes the future CGM sequence. This is the executable form of the manuscript's learned dynamics path; it is a learned predictive model, not proof of a causal intervention effect.
+Diet/Exercise sub-world models simulate future glucose trajectories and rank candidate diet and exercise prescriptions using lifestyle records and physiological data.
 
-1. Data Preparation.
-Prepare the user metadata and physiological trajectory in the following format:
+**1. Data Preparation**
+
+Prepare participant metadata, meal images and descriptions, exercise records and CGM trajectories following [minimal_dataset/sample_data.json](./minimal_dataset/sample_data.json). Provide the corresponding training annotations and preference pairs for encoder pre-training and alignment.
+
+**2. Model Configuration**
+
+Copy the configuration template and set the local Qwen3-8B and Qwen2.5-VL-72B-Instruct paths, image directory and training parameters:
+
 ```bash
-[
-    {
-        "subject_id": "XXX",
-        "subject_name": "XXX",
-        "metadata": {
-        },
-        "meals": [
-          {
-            "food_data": {
-              "food_id": "XXXX",
-              "date":"XXXX" ,
-              "meal_type":"XXXX" ,
-              "data": {
-                "time":,
-                "food_items": [
-                  {
-                    "img_names":
-                  }
-                ]
-              }
-            },
-            "exercise_data_after_meal": {},
-            "cgm_preprandial": [],
-            "cgm_postprandial": [],
-            "sleep_data": {}
-          }
-        ],
-        "exercise_events": [
-          {
-            "event_id": "exercise_001",
-            "recorded_at": "YYYY-MM-DDTHH:MM:SS",
-            "cgm_pre_exercise": [],
-            "cgm_post_exercise": []
-          }
-        ],
-        "nocturnal_hypoglycemia": [
-          {
-            "date": "XXXX",
-            "cgm_pre_sleep": [],
-            "cgm_sleep": []
-          }
-        ]
-      }
-]
+cp configs/local.example.json configs/local.json
 ```
-The bundled minimal dataset is under `./minimal_dataset/`. It contains the current de-identified review fixture: three pseudonymous participants, two meals, two exercise events, two nocturnal windows, four meal photos and the corresponding observed CGM trajectories. `SampleImageDataset` reads meal photos from `minimal_dataset/images/` and also converts top-level `exercise_events` with CGM windows into standalone exercise samples. The raw meal/exercise windows contain 12 pre-event and 36 post-event readings; the current model example uses a fixed 32-point target length (`max_future_len=32`), so the raw JSON retains more post-event points than the default model input. The bundle is a format and smoke-test fixture; it is not sufficient for model training, which requires at least two participants and a project-specific training split.
 
-2.Model config. In `world_model+ranking_module/model_config.py`, the default research configuration resolves to `Qwen/Qwen3-8B` for text features and `Qwen/Qwen2.5-VL-72B-Instruct` for the diet image-language encoder. The download helpers accept the selected configuration and pass the resolved local paths through to the model. The `cnn-backup` vision option is intended for lightweight verification and is not the research model.
+**3. Training**
+
+Run the following commands from the repository root with your training data:
+
 ```bash
-vim world_model+ranking_module/model_config.py
+# Encode structured training annotations with local Qwen3
+python 'world_model+ranking_module/encode_annotations.py' \
+  --input data/annotations.json --output data/train.json \
+  --model-path /path/to/local/Qwen3-8B --image-dir data/images --device cuda
+
+# Pre-train the action encoders
+python 'world_model+ranking_module/train.py' --config configs/local.json \
+  --phase encoder_pretraining --data data/train.json --output outputs/encoders
+
+# Train the world model
+python 'world_model+ranking_module/train.py' --config configs/local.json \
+  --phase world_model --data data/train.json \
+  --init-checkpoint outputs/encoders/checkpoint.pt --output outputs/world
 ```
-3.Training. The `train()` entry point exposes the manuscript phase names through `training_phase`: `encoder_pretraining`, `world_model`, `preference_alignment`, and `participant_update`. The default world-model objective freezes the large text/image encoders, trains their action-projection adapters plus the transition/fusion/decoder modules, rolls the latent transition across the measured post-CGM window, and combines masked future-CGM loss with an auxiliary loss on the ranking head's predicted glucose trajectory. The scalar `ranking_score` has no meaning until preference or physiological utility targets are supplied through the alignment interface; it is not learned from safety scores. The phase switch controls which modules are trainable, but the manuscript's dedicated encoder-label and omics auxiliary datasets are not bundled here. Data splitting is participant-level with five reproducible seeds; all samples from a participant stay in one partition. `split_index` selects one recorded split; running and aggregating all five splits remains an experiment-level step. CGM padding is tracked with validity masks and excluded from loss and metrics. The bundled `minimal_dataset` contains three participants and is a format/smoke-test fixture with only two meals and two exercise events; it is not a statistically meaningful training cohort. The checked-in `main.py` uses the `default` research configuration, which may download Qwen3-8B and Qwen2.5-VL-72B weights; edit the `get_training_config(...)` and path assignments in `main.py` to select another configuration or dataset. Users can change `image_dir`, `data_path`, `save_dir` and the desired training phase before running. From the repository root:
+
+**4. Multi-stage Alignment**
+
+Preference alignment proceeds through `professional`, `physiological` and `user` stages:
+
 ```bash
-cd world_model+ranking_module
-python main.py
+python 'world_model+ranking_module/train.py' --config configs/local.json \
+  --phase preference_alignment --stage professional --data data/train.json \
+  --pairs data/professional_pairs.json --init-checkpoint outputs/world/checkpoint.pt \
+  --output outputs/professional
 ```
 
-4.Evaluation. `python main.py` runs training and then calls `trainer.evaluate()` on the validation split; it is not a checkpoint-only evaluation command. A caller that constructs `CGMPredictionTrainerWithImage` with a saved `model_path` can call `trainer.evaluate()` directly to evaluate an existing checkpoint. The evaluation returns predicted CGM values plus MSE, MAE, RMSE, R² and Pearson metrics.
-```bash
-cd world_model+ranking_module
-python main.py
-```
+For physiological and user alignment, select the corresponding `--stage`, set `--participant-id`, initialize from the previous stage and supply earlier preference files through `--replay`. Use `--phase participant_update` for subsequent updates and `--export-inference` to save inference weights.
 
-5.Multi-stage alignment. `CGMPredictionTrainerWithImage.dpo_loss()` implements the score-margin objective for preferred/rejected prescriptions from the same participant state, with an optional frozen reference-model margin. The public sample dataset does not contain preference pairs, so preference alignment requires a project-specific dataset and caller that supplies those pairs; the helper does not treat safety scores as learned preference scores.
-
-What-if simulation. `CGMPredictionModelWithImage.simulate_counterfactuals()` holds one physiological context fixed and evaluates several encoded diet/exercise alternatives. Each result contains a predicted CGM trajectory, the latent transition rollout and the ranking outputs, stacked as `[batch, candidate, ...]` so candidates can be compared before an action is taken:
-```python
-context = {
-    # The same metadata, sleep, pre-event CGM and masks for one patient state.
-    "metadata_input_ids": metadata_ids,
-    "metadata_attention_mask": metadata_mask,
-    "sleep_input_ids": sleep_ids,
-    "sleep_attention_mask": sleep_mask,
-    "food_input_ids": factual_food_ids,
-    "food_attention_mask": factual_food_mask,
-    "exercise_input_ids": exercise_ids,
-    "exercise_attention_mask": exercise_mask,
-    "cgm_preprandial": cgm_pre,
-    "cgm_preprandial_mask": cgm_pre_mask,
-    "food_images": factual_images,
-}
-result = model.simulate_counterfactuals(
-    context,
-    [{"diet_action": encoded_diet_a}, {"diet_action": encoded_diet_b}],
-    rollout_horizon=32,
-)
-# result["predicted_cgm"] has shape [batch, candidate, horizon].
-```
-An omitted diet or exercise override is held at its observed value. Candidate embeddings may be raw action-encoder representations or already projected transition vectors. The interface supports model-based counterfactual comparison under the learned transition assumptions; observational data alone do not identify a causal effect. A paper-faithful unseen-action claim therefore requires larger longitudinal/interventional coverage and held-out action-combination evaluation.
-
-When a trained world model is available, inject a callable as `world_model_scorer` into `DietPipeline` or `ExercisePipeline` (or pass it to `generate`). The pipeline first removes candidates with `is_safe=False`, then stores the learned value as `_ranking_score` and ranks only the remaining candidates. Without an injected scorer, it uses the safety score as an explicit fallback and does not claim to have learned a physiological ranking.
-
-The transition, trajectory, autoregressive rollout, fusion, ranking, training-phase and DPO additions provide a differentiable reference path for integration tests. They are not a claim that the paper's unpublished checkpoints, full auxiliary losses or preference data have been reconstructed. Exact CGM patch settings, auxiliary omics decoders, supervised encoder-pretraining labels, preference-pair construction/reference checkpoints, and the participant-update data contract still need to be supplied for a paper-faithful reproduction.
-
+For model details, see [docs/METHOD.md](./docs/METHOD.md). Training options are available through `python 'world_model+ranking_module/train.py' --help`.
 
 ### 3. 🛡️ Safety Module
 
-A safety module based on retrieval-augmented generation is designed to enforce safety constraints and reduce hallucination risk of lifestyle prescriptions. The runtime model is the API model configured in `kg_agents/config.json`; Qwen3-8B is the manuscript reference model rather than a hard-coded dependency. The designed system prompt is in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
+A safety module based on retrieval-augmented generation enforces safety constraints for lifestyle prescriptions. Configure the local DeepSeek-R1 service in `kg_agents/config.json`. The system prompts are provided in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
 
 ### 4. 🧬 Multi-omics Model
 
-The model supports multi-omics-based glucose prediction. From the repository root, run:
-```bash
-python omics_model/train_omics_modality_models.py \
-  --labels labels.csv \
-  --covariates covariates.csv \
-  --metagenome metagenome.csv \
-  --lipid_metabolome lipid_metabolome.csv \
-  --proteome proteome.csv \
-  --outdir results_omics_models \
-  --key_col case_id \
-  --group_col subject_id \
-  --day_col day_index \
-  --target_col iAUC_2h_true_baseline_sub_pos_dx5 \
-  --test_size 0.2 \
-  --seed 42 \
-  --lgb_n_splits 5 \
-  --lgb_n_estimators 2000 \
-  --lgb_top_k 300 \
-  --optuna_trials 200 \
-  --calib_bins 10 \
-  --calib_strategy quantile
-```
+Structured omics annotations provide auxiliary supervision during world-model training. The omics prediction head is removed during inference. See [docs/METHOD.md](./docs/METHOD.md) for the training procedure.
 
 ### 5. 🥽 AR Deployment
 
@@ -439,20 +382,14 @@ Alternatively, you can create a ScriptableObject config in Unity Editor:
 
 ## 📊 Minimal Dataset
 
-The current de-identified minimal dataset is available at [`./minimal_dataset/`](./minimal_dataset/). It contains three pseudonymous participants and the following observed records:
+The minimal dataset is available at [`./minimal_dataset/`](./minimal_dataset/). It contains three pseudonymous participants with:
 
-- 2 meals, including four meal photographs and pre/post-meal CGM windows;
-- 2 exercise events, including observed post-event CGM windows;
-- 2 nocturnal windows with rule-derived positive/negative hypoglycemia labels;
-- `manifest.json` with event counts and SHA-256 hashes for the bundled images.
+- 2 meal events and four meal photographs;
+- 2 exercise events with pre/post-event CGM trajectories;
+- 2 nocturnal windows with rule-derived hypoglycemia labels;
+- `manifest.json` with event counts and image hashes.
 
-The JSON bundle keeps the repository's patient-level layout (`subject_id`, `metadata`, `meals`, and `nocturnal_hypoglycemia`) and adds top-level `exercise_events` plus explicit CGM windows. `recorded_at` is a proxy event time; it is not a verified first-bite or exercise-start time. Night labels are rule-derived CGM labels, not clinician-adjudicated diagnoses. The bundled photographs and trajectories are provided for code verification and functional demonstration, subject to the release permissions documented in [`minimal_dataset/README.md`](./minimal_dataset/README.md).
-
-Validate the bundle from the repository root with:
-
-```bash
-python3 minimal_dataset/validate_bundle.py
-```
+Data descriptions are provided in [minimal_dataset/README.md](./minimal_dataset/README.md).
 
 ## 📄 License
 

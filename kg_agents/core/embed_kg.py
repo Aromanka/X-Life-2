@@ -21,7 +21,7 @@ if USE_LOCAL_MODEL:
 
     if local_model_path and os.path.exists(local_model_path):
         print(f"Loading local model: {local_model_path}")
-        model = SentenceTransformer(local_model_path)
+        model = SentenceTransformer(local_model_path, local_files_only=True)
         # Try to get embedding dimension from model config
         EMBEDDING_DIM = model.get_sentence_embedding_dimension()
     else:

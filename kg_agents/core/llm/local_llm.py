@@ -33,21 +33,27 @@ def _load_local_model():
         raise RuntimeError("Local model previously failed to load, skipping retry")
 
     model_path = _get_local_model_path()
-    if model_path is None:
-        raise ValueError("local_model_path not configured")
+    if not model_path or not os.path.isdir(os.path.expanduser(model_path)):
+        raise ValueError("local_model_path must be an existing local model directory")
+    model_path = os.path.expanduser(model_path)
 
     print(f"[INFO] Loading local model from: {model_path}")
 
     try:
-        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+        config = get_config()
+        multimodal = config.get("local_model_kind", "text") == "multimodal"
+        model_class = AutoModelForImageTextToText if multimodal else AutoModelForCausalLM
+        processor_class = AutoProcessor if multimodal else AutoTokenizer
 
-        _local_model = Qwen3VLForConditionalGeneration.from_pretrained(
+        _local_model = model_class.from_pretrained(
             model_path,
             dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            attn_implementation=config.get("local_attn_implementation", "sdpa"),
             device_map="auto",
+            local_files_only=True,
         )
-        _local_processor = AutoProcessor.from_pretrained(model_path)
+        _local_processor = processor_class.from_pretrained(model_path, local_files_only=True)
         print(f"[INFO] Local model loaded successfully")
         return _local_model, _local_processor
     except Exception as e:
@@ -236,6 +242,8 @@ class LocalLLM:
     def _messages_to_text(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Convert message dicts to format expected by local model"""
         # Qwen3-VL apply_chat_template expects content as list of blocks
+        if get_config().get("local_model_kind", "text") != "multimodal":
+            return messages
         converted = []
         for msg in messages:
             content = msg.get("content", "")
@@ -280,6 +288,6 @@ def is_local_mode() -> bool:
     try:
         config = get_config()
         # Only use local mode if 'local_model_path' field explicitly exists
-        return "local_model_path" in config
+        return bool(config.get("local_model_path"))
     except Exception:
         return False

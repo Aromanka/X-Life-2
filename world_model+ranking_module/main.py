@@ -19,11 +19,13 @@ from datetime import datetime, timedelta
 # Import custom modules
 from dataset import SampleImageDataset, get_tokenizer
 from model import CGMPredictionModelWithImage
-from hf_mirror_config import with_hf_mirror, enable_hf_mirror
+from training import (LossWeights, configure_training_phase, set_training_mode,
+                      encoder_pretraining_objective, world_model_objective, to_device)
 
 class SampleImagePredictionDataset(Dataset):
 
-    def __init__(self, dataset, tokenizer, max_seq_length=512, cgm_seq_length=92, image_dir=None, image_size=(224, 224)):
+    def __init__(self, dataset, tokenizer, max_seq_length=512, cgm_seq_length=92, image_dir=None,
+                 image_size=(224, 224), annotation_dim=4096, require_cgm=True, sampling_interval_minutes=5):
         """
         Initialize dataset
 
@@ -40,6 +42,10 @@ class SampleImagePredictionDataset(Dataset):
         self.cgm_seq_length = cgm_seq_length
         self.image_dir = image_dir
         self.image_size = image_size
+        self.annotation_dim = int(annotation_dim)
+        self.sampling_interval_minutes = float(sampling_interval_minutes)
+        if self.sampling_interval_minutes <= 0 or self.cgm_seq_length < 1:
+            raise ValueError("CGM interval and sequence length must be positive.")
 
         self.original_dataset = dataset
 
@@ -53,7 +59,7 @@ class SampleImagePredictionDataset(Dataset):
         self.valid_samples = []
         for i in range(len(self.original_dataset)):
             sample = self.original_dataset[i]
-            if sample['cgm_pre'] and sample['cgm_post']:
+            if not require_cgm or (sample['cgm_pre'] and sample['cgm_post']):
                 self.valid_samples.append(i)
 
         print(f"Original dataset size: {len(self.original_dataset)}")
@@ -132,18 +138,9 @@ class SampleImagePredictionDataset(Dataset):
                         image_tensor = self.image_transform(image)
                         food_images.append(image_tensor)
                     else:
-                        print(f"Warning: Image does not exist {full_path}")
-                        zero_image = torch.zeros(3, *self.image_size)
-                        food_images.append(zero_image)
+                        raise FileNotFoundError(full_path)
                 except Exception as e:
-                    print(f"Failed to load image {image_path}: {str(e)}")
-
-                    zero_image = torch.zeros(3, *self.image_size)
-                    food_images.append(zero_image)
-
-        if not food_images:
-            zero_image = torch.zeros(3, *self.image_size)
-            food_images.append(zero_image)
+                    raise ValueError(f"Failed to load dietary image {image_path}") from e
 
         # Get basic information
         subject_id = sample['subject_id']
@@ -153,10 +150,14 @@ class SampleImagePredictionDataset(Dataset):
         # CGM records are selected by the meal event time before padding to a
         # batch length.  The returned masks distinguish measured points from
         # padding, so copied/filler values never contribute to the objective.
-        event_time = self._meal_event_time(
-            date,
-            meal_info.get('time', '') or exercise_info.get('recorded_at', '')
-        )
+        if sample.get('event_time'):
+            event_time = self._meal_event_time('', sample['event_time'])
+        elif 'event_time' in sample:
+            event_time = None
+        elif sample['cgm_type'] == 'exercise':
+            event_time = self._meal_event_time('', exercise_info.get('recorded_at', ''))
+        else:
+            event_time = self._meal_event_time(date, meal_info.get('time', ''))
         cgm_pre, cgm_pre_mask = self._process_precgm_sequence(
             sample['cgm_pre'], event_time=event_time, return_mask=True
         )
@@ -164,6 +165,19 @@ class SampleImagePredictionDataset(Dataset):
             sample['cgm_post'], event_time=event_time, return_mask=True
         )
 
+        semantic_targets, semantic_masks = {}, {}
+        target_record = sample.get('training_targets') or {}
+        for kind in ('diet', 'exercise', 'omics'):
+            value = target_record.get(kind)
+            if value is None:
+                semantic_targets[kind] = torch.zeros(self.annotation_dim)
+                semantic_masks[kind] = torch.tensor(False)
+            else:
+                vector = torch.as_tensor(value, dtype=torch.float32)
+                if vector.shape != (self.annotation_dim,) or not torch.isfinite(vector).all():
+                    raise ValueError(f"{kind} target must be a finite vector of length {self.annotation_dim}.")
+                semantic_targets[kind] = vector
+                semantic_masks[kind] = torch.tensor(True)
         return {
             'metadata_input_ids': metadata_encoding['input_ids'].squeeze(),
             'metadata_attention_mask': metadata_encoding['attention_mask'].squeeze(),
@@ -174,6 +188,10 @@ class SampleImagePredictionDataset(Dataset):
             'exercise_input_ids': exercise_encoding['input_ids'].squeeze(),
             'exercise_attention_mask': exercise_encoding['attention_mask'].squeeze(),
             'food_images': food_images,  # List of image tensors
+            'food_texts': meal_text,
+            'semantic_targets': semantic_targets,
+            'semantic_masks': semantic_masks,
+            'cgm_type': sample['cgm_type'],
             'cgm_preprandial': torch.tensor(cgm_pre, dtype=torch.float),
             'cgm_postprandial': torch.tensor(cgm_post, dtype=torch.float),
             'cgm_preprandial_mask': torch.tensor(cgm_pre_mask, dtype=torch.bool),
@@ -190,7 +208,7 @@ class SampleImagePredictionDataset(Dataset):
 
         text_parts = []
         for key, value in data_dict.items():
-            if value and value != 'N/A' and value != 'Unknown':
+            if value is not None and value != 'N/A' and value != 'Unknown':
                 text_parts.append(f"{key}:{value}")
 
         return '; '.join(text_parts)
@@ -200,28 +218,13 @@ class SampleImagePredictionDataset(Dataset):
         if not meal_info:
             return "No meal data"
 
-        text_parts = []
-
-        # Date
-        date = meal_info.get('date', '')
-        if date:
-            text_parts.append(f"Date:{date}")
-
-        # Food ID
-        food_id = meal_info.get('food_id', '')
-        if food_id:
-            text_parts.append(f"Food ID:{food_id}")
-
-        # Time
-        time = meal_info.get('time', '')
-        if time:
-            text_parts.append(f"Time:{time}")
-
-        # Image information
-        if 'image_paths' in meal_info and meal_info['image_paths']:
-            text_parts.append(f"Images:{'; '.join(meal_info['image_paths'])}")
-
-        return '; '.join(text_parts)
+        fields = ('meal_type', 'time', 'description', 'ingredients', 'preparation', 'preparation_method',
+                  'nutrition', 'nutrients', 'carbohydrate_g', 'protein_g', 'fat_g', 'fiber_g')
+        content = {key: meal_info[key] for key in fields if meal_info.get(key) is not None}
+        items = [{key: value for key, value in item.items() if key not in {'image_name', 'image_path'}}
+                 for item in meal_info.get('food_items', [])]
+        content['items'] = [item for item in items if item]
+        return json.dumps(content, ensure_ascii=False, sort_keys=True) if content else 'No dietary description'
 
     @staticmethod
     def _meal_event_time(date, time):
@@ -237,11 +240,15 @@ class SampleImagePredictionDataset(Dataset):
     @staticmethod
     def _parse_cgm_point(point):
         """Parse ``(timestamp, value)`` while tolerating legacy numeric rows."""
+        if isinstance(point, (int, float, np.number)):
+            return (None, float(point)) if np.isfinite(point) else None
         if not isinstance(point, (list, tuple)) or len(point) < 2:
             return None
         try:
             value = float(point[1])
         except (TypeError, ValueError):
+            return None
+        if not np.isfinite(value):
             return None
         timestamp = None
         try:
@@ -272,6 +279,19 @@ class SampleImagePredictionDataset(Dataset):
             else:
                 parsed = [p for p in parsed if p[0] is not None and event_time < p[0] <= end]
 
+            # Keep missing measurements in their time slots. Never interpolate
+            # future labels. The configured interval must match the input CGM.
+            values = [0.0] * self.cgm_seq_length
+            valid_mask = [False] * self.cgm_seq_length
+            interval = self.sampling_interval_minutes * 60.0
+            for timestamp, value in parsed:
+                offset = (timestamp - event_time).total_seconds() / interval
+                slot = (int(np.floor(offset)) + self.cgm_seq_length if window == 'pre'
+                        else int(np.ceil(offset)) - 1)
+                if 0 <= slot < self.cgm_seq_length:
+                    values[slot], valid_mask[slot] = value, True
+            return (values, valid_mask) if return_mask else values
+
         # For an overlong history retain points nearest to the event; for a
         # future target retain the earliest points in chronological order.
         if len(parsed) > self.cgm_seq_length:
@@ -282,8 +302,12 @@ class SampleImagePredictionDataset(Dataset):
         valid_mask = [True] * len(values)
         pad_len = self.cgm_seq_length - len(values)
         if pad_len > 0:
-            values.extend([0.0] * pad_len)
-            valid_mask.extend([False] * pad_len)
+            if window == 'pre':
+                values = [0.0] * pad_len + values
+                valid_mask = [False] * pad_len + valid_mask
+            else:
+                values.extend([0.0] * pad_len)
+                valid_mask.extend([False] * pad_len)
 
         if return_mask:
             return values, valid_mask
@@ -295,87 +319,10 @@ class SampleImagePredictionDataset(Dataset):
     def _process_postcgm_sequence(self, cgm_data, event_time=None, return_mask=False):
         return self._process_cgm_sequence(cgm_data, event_time=event_time, window='post', return_mask=return_mask)
 
-# Globally enable HF mirror
-enable_hf_mirror()
+# Qwen weights and tokenizers are loaded only from explicit local directories.
 
-def _resolve_text_model_name(model_key_or_name=None):
-    """Resolve a config key to the exact Hugging Face repository id."""
-    from model_config import LANGUAGE_MODELS, get_model_config
-    value = model_key_or_name
-    if value in LANGUAGE_MODELS:
-        return get_model_config(value)['name']
-    if value:
-        return value
-    return get_model_config()['name']
+# Model-loading interfaces use local directories only. No hub downloads.
 
-
-def _resolve_vision_model_name(model_key_or_name=None):
-    """Resolve a vision config key to the exact Hugging Face repository id."""
-    from model_config import VISION_MODELS, get_vision_model_config
-    value = model_key_or_name
-    if value in VISION_MODELS:
-        return get_vision_model_config(value)['name']
-    if value:
-        return value
-    return get_vision_model_config()['name']
-
-
-def download_qwen_model_enhanced(model_key_or_name=None):
-    """Download the configured text encoder from the HF mirror.
-
-    The repository id is resolved from ``model_key_or_name`` instead of being
-    hard-coded to the legacy 0.6B embedding checkpoint.
-    """
-    model_name = _resolve_text_model_name(model_key_or_name)
-    print(f"Downloading text model {model_name} from HF mirror...")
-
-    # Set multiple environment variables to ensure using mirror
-    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-    os.environ['HUGGINGFACE_HUB_ENDPOINT'] = 'https://hf-mirror.com'
-
-    try:
-        print("Using snapshot_download to download model...")
-        from huggingface_hub import snapshot_download
-        model_path = snapshot_download(
-            repo_id=model_name,
-            endpoint='https://hf-mirror.com'
-        )
-        print(f"Model downloaded to: {model_path}")
-        print(f"Text model download completed: {model_name}")
-        return model_path
-
-    except Exception as e:
-        print(f"Download failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def download_qwen_vl_model(model_key_or_name=None):
-    """Download the configured vision-language model from the HF mirror."""
-    model_name = _resolve_vision_model_name(model_key_or_name)
-    if str(model_key_or_name).lower() == 'cnn-backup' or model_name == 'CNN Backup':
-        return None
-    print(f"Downloading vision-language model {model_name} from HF mirror...")
-
-    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-    os.environ['HUGGINGFACE_HUB_ENDPOINT'] = 'https://hf-mirror.com'
-
-    try:
-        print("Using snapshot_download to download model...")
-        from huggingface_hub import snapshot_download
-        model_path = snapshot_download(
-            repo_id=model_name,
-            endpoint='https://hf-mirror.com'
-        )
-        print(f"Model downloaded to: {model_path}")
-        print(f"Vision-language model download completed: {model_name}")
-        return model_path
-
-    except Exception as e:
-        print(f"Download failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 class CGMPredictionTrainerWithImage:
     """CGM prediction model trainer with image input support"""
@@ -406,6 +353,10 @@ class CGMPredictionTrainerWithImage:
         self.cgm_dim_feedforward = config.get('cgm_dim_feedforward', 512)
         self.dropout = config.get('dropout', 0.1)
         self.use_image_features = config.get('use_image_features', True)
+        self.cgm_seq_length = int(config.get('cgm_seq_length', 32))
+        self.patch_size = int(config.get('patch_size', 6))
+        self.annotation_dim = int(config.get('annotation_dim', 4096))
+        self.loss_weights = LossWeights(**config.get('loss_weights', {}))
         self.training_phase = config.get('training_phase', 'world_model')
         self.freeze_action_encoders = config.get(
             'freeze_action_encoders', self.training_phase != 'encoder_pretraining'
@@ -433,7 +384,7 @@ class CGMPredictionTrainerWithImage:
         self.split_index = int(config.get('split_index', 0))
 
         # Gradient accumulation parameters
-        self.gradient_accumulation_steps = 4
+        self.gradient_accumulation_steps = int(config.get('gradient_accumulation_steps', 4))
 
         self.model_path = config.get('model_path', None)
 
@@ -453,36 +404,10 @@ class CGMPredictionTrainerWithImage:
             json.dump(config, f, indent=2, ensure_ascii=False)
         print(f"Configuration saved to: {config_save_path}")
 
-        from dataset import get_tokenizer
+        self.qwen_model_path = config.get('qwen_model_path', config.get('text_model_path'))
+        self.qwen_vl_model_path = config.get('vision_model_path')
+        self.tokenizer = get_tokenizer(model_path=self.qwen_model_path)
 
-        if config['model_key'].lower().startswith('qwen'):
-            model_path = download_qwen_model_enhanced(config['model_key'])
-            if model_path:
-                # Load tokenizer from local path
-                try:
-                    from transformers import AutoTokenizer
-                    self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-                    print(f"Loading tokenizer from local path: {model_path}")
-                    # Save model path for later use
-                    self.qwen_model_path = model_path
-                except Exception as e:
-                    print(f"Failed to load tokenizer from local path: {e}")
-                    print("Using simplified tokenizer")
-                    self.tokenizer = get_tokenizer(config['model_key'], use_mirror=True)
-                    self.qwen_model_path = None
-            else:
-                self.tokenizer = get_tokenizer(config['model_key'], use_mirror=True)
-                self.qwen_model_path = None
-        else:
-
-            self.tokenizer = get_tokenizer(config['model_key'], use_mirror=True)
-            self.qwen_model_path = None
-
-        # If using image features, download VL model
-        if self.use_image_features:
-            self.qwen_vl_model_path = download_qwen_vl_model(self.vision_model_key)
-        else:
-            self.qwen_vl_model_path = None
 
         # Load data
         self._load_data()
@@ -490,9 +415,7 @@ class CGMPredictionTrainerWithImage:
         # Initialize model
         self._initialize_model()
 
-        # Apply the phase policy before building the optimizer.  This makes
-        # the manuscript's frozen-action-encoder requirement explicit instead
-        # of always updating every encoder through the default optimizer.
+        # Apply phase-specific parameter freezing before building the optimizer.
         self.set_training_phase(self.training_phase)
 
         # Initialize optimizer and loss function
@@ -512,7 +435,9 @@ class CGMPredictionTrainerWithImage:
             dataset=dataset,
             tokenizer=self.tokenizer,
             max_seq_length=512,
-            cgm_seq_length=32,
+            cgm_seq_length=self.cgm_seq_length,
+            annotation_dim=self.annotation_dim,
+            require_cgm=self.training_phase != 'encoder_pretraining',
             image_dir=self.image_dir
         )
 
@@ -530,9 +455,8 @@ class CGMPredictionTrainerWithImage:
         if len(unique_subjects) < 2:
             raise ValueError(
                 "Participant-level 80/20 validation requires at least two "
-                "participants. The bundled minimal fixture is a smoke-test "
-                "dataset; provide a larger project participant dataset for "
-                "meaningful training."
+                "participants. Provide a dataset with at least two distinct "
+                "participant IDs."
             )
         split_seeds = getattr(self, 'split_seeds', [42, 43, 44, 45, 46])
         all_splits = self._participant_level_splits(
@@ -632,7 +556,7 @@ class CGMPredictionTrainerWithImage:
                 food_images.append(item['food_images'][0])
             else:
 
-                food_images.append(torch.zeros(3, 224, 224))
+                food_images.append(None)
 
 
         subject_ids = [item['subject_id'] for item in batch]
@@ -649,6 +573,10 @@ class CGMPredictionTrainerWithImage:
             'exercise_input_ids': exercise_input_ids,
             'exercise_attention_mask': exercise_attention_mask,
             'food_images': food_images,
+            'food_texts': [item['food_texts'] for item in batch],
+            'semantic_targets': {key: torch.stack([item['semantic_targets'][key] for item in batch]) for key in ('diet', 'exercise', 'omics')},
+            'semantic_masks': {key: torch.stack([item['semantic_masks'][key] for item in batch]) for key in ('diet', 'exercise', 'omics')},
+            'cgm_type': [item['cgm_type'] for item in batch],
             'cgm_preprandial': cgm_preprandial,
             'cgm_postprandial': cgm_postprandial,
             'cgm_preprandial_mask': cgm_preprandial_mask,
@@ -675,7 +603,9 @@ class CGMPredictionTrainerWithImage:
             qwen_model_path=getattr(self, 'qwen_model_path', None),
             use_image_features=self.use_image_features,
             vision_model_key=self.vision_model_key,
-            vision_model_path=getattr(self, 'qwen_vl_model_path', None)
+            vision_model_path=getattr(self, 'qwen_vl_model_path', None),
+            max_future_len=self.cgm_seq_length, patch_size=self.patch_size,
+            annotation_dim=self.annotation_dim
         )
 
 
@@ -720,6 +650,7 @@ class CGMPredictionTrainerWithImage:
             (getattr(self.model, 'exercise_transition', None), self.learning_rate),
             (getattr(self.model, 'future_state_fusion', None), self.learning_rate),
             (getattr(self.model, 'ranking_head', None), self.learning_rate),
+            *[(getattr(self.model, name, None), self.learning_rate) for name in ('diet_annotation_head', 'exercise_annotation_head', 'diet_aux_decoder', 'exercise_aux_decoder', 'omics_head')],
         ]
         param_groups = []
         for module, lr in candidate_groups:
@@ -738,49 +669,9 @@ class CGMPredictionTrainerWithImage:
         self.criterion = nn.MSELoss()
 
     def set_training_phase(self, phase):
-        """Set trainable modules for the three manuscript training phases.
-
-        ``encoder_pretraining`` trains the diet/exercise action encoders;
-        ``world_model`` freezes the large text/image encoders, trains their
-        action-projection adapters and transitions/decoders; the
-        alignment phases keep the action encoders frozen and train the
-        transition/ranking parameters.  The method is intentionally explicit
-        so callers can inspect ``requires_grad`` before starting a run.
-        """
-        valid = {'encoder_pretraining', 'world_model', 'preference_alignment', 'participant_update'}
-        if phase not in valid:
-            raise ValueError(f"Unknown training phase {phase!r}; choose one of {sorted(valid)}")
         self.training_phase = phase
-        for parameter in self.model.parameters():
-            parameter.requires_grad = False
+        configure_training_phase(self.model, phase)
 
-        if phase == 'encoder_pretraining' or (
-            phase == 'world_model' and not self.freeze_action_encoders
-        ):
-            for module in (
-                self.model.text_encoder,
-                getattr(self.model, 'image_encoder', None),
-                getattr(self.model, 'diet_action_projection', None),
-                getattr(self.model, 'exercise_action_projection', None),
-            ):
-                if module is not None:
-                    for parameter in module.parameters():
-                        parameter.requires_grad = True
-        else:
-            train_modules = [
-                self.model.cgm_encoder, self.model.feature_fusion,
-                getattr(self.model, 'diet_action_projection', None),
-                getattr(self.model, 'exercise_action_projection', None),
-                self.model.cgm_decoder,
-                getattr(self.model, 'diet_transition', None),
-                getattr(self.model, 'exercise_transition', None),
-                getattr(self.model, 'future_state_fusion', None),
-                getattr(self.model, 'ranking_head', None),
-            ]
-            for module in train_modules:
-                if module is not None:
-                    for parameter in module.parameters():
-                        parameter.requires_grad = True
 
     @staticmethod
     def dpo_loss(preferred_score, rejected_score, reference_preferred_score=None,
@@ -802,110 +693,73 @@ class CGMPredictionTrainerWithImage:
         return (squared_error * weights).sum() / denominator
 
     def train_epoch(self, data_loader=None):
-        """Train one epoch"""
-        self.model.train()
-        total_loss = 0.0
-        data_loader = data_loader or self.train_loader
-        num_batches = len(data_loader)
-
-        progress_bar = tqdm(data_loader, desc="Training")
-
-        for batch_idx, batch in enumerate(progress_bar):
-            metadata_input_ids = batch['metadata_input_ids'].to(self.device)
-            metadata_attention_mask = batch['metadata_attention_mask'].to(self.device)
-            sleep_input_ids = batch['sleep_input_ids'].to(self.device)
-            sleep_attention_mask = batch['sleep_attention_mask'].to(self.device)
-            food_input_ids = batch['food_input_ids'].to(self.device)
-            food_attention_mask = batch['food_attention_mask'].to(self.device)
-            exercise_input_ids = batch['exercise_input_ids'].to(self.device)
-            exercise_attention_mask = batch['exercise_attention_mask'].to(self.device)
-            food_images = [img.to(self.device) for img in batch['food_images']]
-            cgm_preprandial = batch['cgm_preprandial'].to(self.device)
-            cgm_postprandial = batch['cgm_postprandial'].to(self.device)
-            cgm_preprandial_mask = batch['cgm_preprandial_mask'].to(self.device)
-            cgm_postprandial_mask = batch['cgm_postprandial_mask'].to(self.device)
-
-            details = self.model(
-                metadata_input_ids=metadata_input_ids,
-                metadata_attention_mask=metadata_attention_mask,
-                sleep_input_ids=sleep_input_ids,
-                sleep_attention_mask=sleep_attention_mask,
-                food_input_ids=food_input_ids,
-                food_attention_mask=food_attention_mask,
-                exercise_input_ids=exercise_input_ids,
-                exercise_attention_mask=exercise_attention_mask,
-                cgm_preprandial=cgm_preprandial,
-                cgm_postprandial=cgm_postprandial,
-                food_images=food_images,
-                cgm_preprandial_mask=cgm_preprandial_mask,
-                rollout_horizon=self.rollout_horizon,
-                return_details=True,
-            )
-            predicted_cgm = details['predicted_cgm']
-
-            loss = self._masked_mse(predicted_cgm, cgm_postprandial, cgm_postprandial_mask)
-            if self.ranking_glucose_loss_weight > 0:
-                loss = loss + self.ranking_glucose_loss_weight * self._masked_mse(
-                    details['ranking_glucose'], cgm_postprandial, cgm_postprandial_mask
-                )
-
-            loss = loss / self.gradient_accumulation_steps
-            loss.backward()
-
-            total_loss += loss.item() * self.gradient_accumulation_steps
-
-            if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+        set_training_mode(self.model)
+        loader = self.train_loader if data_loader is None else data_loader
+        if len(loader) == 0:
+            raise ValueError("Training data loader is empty.")
+        objective = (encoder_pretraining_objective if self.training_phase == 'encoder_pretraining'
+                     else world_model_objective)
+        if self.training_phase not in {'encoder_pretraining', 'world_model'}:
+            raise ValueError("Use train.py preference alignment for paired preference training.")
+        self.optimizer.zero_grad()
+        total = 0.0
+        for i, batch in enumerate(tqdm(loader, desc='Training')):
+            loss, _ = objective(self.model, to_device(batch, self.device), self.loss_weights)
+            group_start = (i // self.gradient_accumulation_steps) * self.gradient_accumulation_steps
+            group_size = min(self.gradient_accumulation_steps, len(loader) - group_start)
+            (loss / group_size).backward()
+            total += float(loss.detach())
+            if (i + 1) % self.gradient_accumulation_steps == 0 or i + 1 == len(loader):
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_norm)
+                self.optimizer.step(); self.optimizer.zero_grad()
+        return total / len(loader)
 
 
-            progress_bar.set_postfix({'loss': loss.item() * self.gradient_accumulation_steps})
-
-        if num_batches % self.gradient_accumulation_steps != 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-
-        avg_loss = total_loss / num_batches
-        return avg_loss
-
-    def update_participant(self, participant_loader, epochs=1):
-        """Run a participant-specific update using the world-model objective.
-
-        The caller supplies a loader containing only one participant's new
-        physiological responses.  This keeps deployment updates explicit and
-        prevents an accidental update on the full training population.
-        """
-        if participant_loader is None or len(participant_loader) == 0:
-            raise ValueError("participant_loader must contain participant feedback samples")
+    def update_participant(self, participant_loader, observed_loader=None, epochs=1, stage='user'):
+        """Update the ranker/G with paired feedback and this participant's factual CGM."""
+        from training import FrozenRankingReference, preference_objective
+        from train import cycle_next
+        if observed_loader is None or not len(observed_loader) or not len(participant_loader):
+            raise ValueError("Supply paired preference and factual observed CGM loaders.")
+        if stage not in {'physiological', 'user'} or epochs < 1:
+            raise ValueError("Participant updates require physiological/user preferences and positive epochs.")
         self.set_training_phase('participant_update')
         self._initialize_optimizer()
-        losses = []
-        for _ in range(int(epochs)):
-            losses.append(self.train_epoch(data_loader=participant_loader))
-        return losses
+        reference = FrozenRankingReference(self.model).to(self.device)
+        history = []
+        participant_id = None
+        for epoch in range(epochs):
+            set_training_mode(self.model)
+            observed_iterator = iter(observed_loader)
+            total = 0.0
+            for pairs in participant_loader:
+                observed, observed_iterator = cycle_next(observed_loader, observed_iterator)
+                ids = set(map(str, pairs['preferred']['subject_id'] + observed['subject_id']))
+                if len(ids) != 1 or (participant_id is not None and ids != {participant_id}):
+                    raise ValueError("Participant update loaders must belong to one identical participant.")
+                participant_id = next(iter(ids))
+                loss, _ = preference_objective(self.model, to_device(pairs, self.device),
+                                               to_device(observed, self.device), reference, self.loss_weights, stage)
+                self.optimizer.zero_grad(); loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_norm)
+                self.optimizer.step(); total += float(loss.detach())
+            history.append(total / len(participant_loader))
+        return history
 
-    def preference_alignment_step(self, preferred_score, rejected_score,
-                                  reference_preferred_score=None,
-                                  reference_rejected_score=None, beta=None):
-        """Apply one DPO update for a same-state preference pair batch."""
-        self.set_training_phase('preference_alignment')
-        self._initialize_optimizer()
-        loss = self.dpo_loss(
-            preferred_score,
-            rejected_score,
-            reference_preferred_score=reference_preferred_score,
-            reference_rejected_score=reference_rejected_score,
-            beta=0.1 if beta is None else beta,
-        )
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.gradient_clip_norm)
+    def preference_alignment_step(self, pairs, observed_batch, reference, stage='professional'):
+        from training import preference_objective
+        if self.training_phase != 'preference_alignment':
+            self.set_training_phase('preference_alignment')
+            self._initialize_optimizer()
+        set_training_mode(self.model)
+        loss, _ = preference_objective(self.model, to_device(pairs, self.device),
+                                      to_device(observed_batch, self.device), reference,
+                                      self.loss_weights, stage)
+        self.optimizer.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_norm)
         self.optimizer.step()
         return loss.detach()
+
 
     @torch.no_grad()
     def simulate_counterfactuals(self, context, action_variants, rollout_horizon=None):
@@ -938,7 +792,7 @@ class CGMPredictionTrainerWithImage:
                 food_attention_mask = batch['food_attention_mask'].to(self.device)
                 exercise_input_ids = batch['exercise_input_ids'].to(self.device)
                 exercise_attention_mask = batch['exercise_attention_mask'].to(self.device)
-                food_images = [img.to(self.device) for img in batch['food_images']]
+                food_images = [img.to(self.device) if isinstance(img, torch.Tensor) else img for img in batch['food_images']]
                 cgm_preprandial = batch['cgm_preprandial'].to(self.device)
                 cgm_postprandial = batch['cgm_postprandial'].to(self.device)
                 cgm_preprandial_mask = batch['cgm_preprandial_mask'].to(self.device)
@@ -956,6 +810,7 @@ class CGMPredictionTrainerWithImage:
                     cgm_preprandial=cgm_preprandial,
                     cgm_postprandial=None,
                     food_images=food_images,
+                    food_texts=batch['food_texts'],
                     cgm_preprandial_mask=cgm_preprandial_mask,
                     rollout_horizon=self.rollout_horizon,
                 )
@@ -1151,7 +1006,7 @@ class CGMPredictionTrainerWithImage:
                 food_attention_mask = batch['food_attention_mask'].to(self.device)
                 exercise_input_ids = batch['exercise_input_ids'].to(self.device)
                 exercise_attention_mask = batch['exercise_attention_mask'].to(self.device)
-                food_images = [img.to(self.device) for img in batch['food_images']]
+                food_images = [img.to(self.device) if isinstance(img, torch.Tensor) else img for img in batch['food_images']]
                 cgm_preprandial = batch['cgm_preprandial'].to(self.device)
                 cgm_postprandial = batch['cgm_postprandial'].to(self.device)
                 cgm_preprandial_mask = batch['cgm_preprandial_mask'].to(self.device)
@@ -1175,6 +1030,7 @@ class CGMPredictionTrainerWithImage:
                     cgm_preprandial=cgm_preprandial,
                     cgm_postprandial=None,
                     food_images=food_images,
+                    food_texts=batch['food_texts'],
                     cgm_preprandial_mask=cgm_preprandial_mask,
                 )
 
@@ -1425,41 +1281,8 @@ class CGMPredictionTrainerWithImage:
 
 
 def main():
-    """Main function"""
-
-    from model_config import get_training_config, list_training_configs, list_available_models, create_complete_config
-    use_new_config = True
-
-    # List available configurations
-    list_training_configs()
-    list_available_models()
-
-    # Get training configuration
-    if use_new_config:
-        config = get_training_config('default')
-    else:
-        config = get_training_config('debug')  # Can be changed to 'debug' or 'production'
-
-    # Keep the runnable example tied to the repository's current public
-    # fixture.  Resolve paths from this file so ``python main.py`` works
-    # whether it is launched from the repository root or this directory.
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    default_data_path = os.path.join(repo_root, 'minimal_dataset', 'sample_data.json')
-    default_image_dir = os.path.join(repo_root, 'minimal_dataset', 'images')
-    config.setdefault('use_image_features', True)
-    config.setdefault('data_path', default_data_path)
-    config.setdefault('image_dir', default_image_dir)
-    config.setdefault('save_dir', os.path.join(repo_root, '.checkpoints', 'cgm_prediction_models_with_image'))
-
-    # Create trainer
-    trainer = CGMPredictionTrainerWithImage(config)
-
-    # Train model
-    trainer.train()
-
-    trainer.evaluate()
-
-    print("Training completed!")
+    from train import main as train_main
+    train_main()
 
 
 if __name__ == "__main__":

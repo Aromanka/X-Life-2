@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from typing import List, Dict, Any
 from datetime import datetime
@@ -245,8 +246,8 @@ class ExercisePipeline:
             if plan_id in assessments:
                 plan["_assessment"] = assessments[plan_id]
 
-        # Step 3: Select top_k_selection by safety score
-        print(f"\n[3/4] Selecting top {top_k_selection} plans by safety score...")
+        # Step 3: Rank the safe candidates.
+        print(f"\n[3/4] Selecting top {top_k_selection} safe plans...")
 
         # Safety is a gate: unsafe plans remain in ``all_plans`` for audit,
         # but cannot enter the final recommendation list.
@@ -264,14 +265,15 @@ class ExercisePipeline:
                     learned = scorer(plan, user_metadata)
                 if isinstance(learned, dict):
                     learned = learned.get("ranking_score", learned.get("score"))
-                if learned is not None:
-                    plan["_ranking_score"] = float(learned)
+                if learned is None or not math.isfinite(float(learned)):
+                    raise ValueError("The world-model scorer must return a finite ranking score.")
+                plan["_ranking_score"] = float(learned)
 
         # Sort safe plans by learned score when a world model is injected;
         # otherwise keep the deterministic safety-score fallback.
         sorted_plans = sorted(
             safe_plans,
-            key=lambda p: p.get("_ranking_score", p.get("_assessment", {}).get("score", 0)),
+            key=lambda p: p["_ranking_score"] if scorer is not None else p.get("_assessment", {}).get("score", 0),
             reverse=True
         )
         top_plans = sorted_plans[:top_k_selection]

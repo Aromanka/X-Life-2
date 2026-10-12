@@ -8,7 +8,7 @@ import pandas as pd
 from tqdm import tqdm
 from config_loader import get_config
 from core.llm.utils import parse_json_response
-from kg.prompts import (
+from core.prompts import (
     DIET_KG_EXTRACT_COT_PROMPT_v1,
     DIET_KG_RESOLUTION_PROMPT_v1,
     EXER_KG_EXTRACT_COT_PROMPT_v1,
@@ -28,7 +28,7 @@ config = get_config()
 API_MODEL = config.get("api_model", {})
 DEEPSEEK_API_KEY = API_MODEL.get("api_key", "")
 DEEPSEEK_BASE_URL = API_MODEL.get("base_url", "")
-MODEL_NAME = API_MODEL.get("model", "deepseek-chat")
+MODEL_NAME = API_MODEL.get("model", "DeepSeek-R1")
 # Always use API model (no local model fallback)
 USE_LOCAL = False
 KG_EXTRACT_LOG_PATH = "kg/llm_log.log"
@@ -517,7 +517,7 @@ def main():
             break
         elif arg in ["-h", "--help"]:
             print("""
-Usage: python -m core.build_kg [options]
+Usage: python -m core.build_kg_2_steps [options]
 Options:
   --kg=diet Build only diet knowledge graph
   --kg=exercise Build only exercise knowledge graph

@@ -7,6 +7,7 @@ import logging
 from pipeline.diet_pipeline import DietPipeline
 from pipeline.exer_pipeline import ExercisePipeline
 from agents.safeguard.assessor import SafeguardAgent
+from core.world_model_scorer import WorldModelScorer
 
 # --- Configuration ---
 app = Flask(__name__)
@@ -19,8 +20,9 @@ logger.info("Initializing Global AI Agents...")
 
 # These instantiations will trigger any necessary model loading via the singletons
 # in your core/llm/client.py and core/neo4j logic.
-diet_service = DietPipeline()
-exercise_service = ExercisePipeline()
+world_model_scorer = WorldModelScorer()
+diet_service = DietPipeline(world_model_scorer=world_model_scorer.bind('diet'))
+exercise_service = ExercisePipeline(world_model_scorer=world_model_scorer.bind('exercise'))
 safeguard_service = SafeguardAgent()
 
 logger.info("Agents initialized and ready.")
@@ -60,7 +62,8 @@ def generate_assess_diet():
             top_k_selection=data.get("top_k_selection", 3),
             use_vector=data.get("use_vector", False),
             rag_topk=data.get("rag_topk", 3),
-            output_path=data.get("output_path", "plan.json")
+            output_path=data.get("output_path", "plan.json"),
+            world_model_scorer=world_model_scorer.bind('diet', data.get('world_model_context'))
         )
         return jsonify(output.to_dict())
 
@@ -95,7 +98,8 @@ def generate_assess_exercise():
             meal_timing=data.get("meal_timing", ""),
             use_vector=data.get("use_vector", False),
             rag_topk=data.get("rag_topk", 3),
-            output_path=data.get("output_path", "exer_plan.json")
+            output_path=data.get("output_path", "exer_plan.json"),
+            world_model_scorer=world_model_scorer.bind('exercise', data.get('world_model_context'))
         )
         return jsonify(output.to_dict())
 

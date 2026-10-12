@@ -10,13 +10,11 @@ LANGUAGE_MODELS = {
         'hidden_size': 768,
         'description': 'BERT base Chinese model, suitable for general Chinese text processing'
     },
-    # The manuscript uses the generative Qwen3-8B encoder for exercise and
-    # physiological text features.  Keep the older embedding entry as an
-    # explicit legacy option for backwards-compatible checkpoints.
+    # Qwen3-8B encodes exercise and physiological text features.
     'qwen3-8b': {
         'name': 'Qwen/Qwen3-8B',
         'hidden_size': 4096,
-        'description': 'Qwen3 8B language model used by the manuscript'
+        'description': 'Qwen3 8B exercise and physiological text encoder'
     },
     'qwen-7b': {
         'name': 'Qwen/Qwen-7B',
@@ -26,12 +24,12 @@ LANGUAGE_MODELS = {
     'qwen3-embedding-8b': {
         'name': 'Qwen/Qwen3-Embedding-8B',
         'hidden_size': 4096,
-        'description': 'Legacy Qwen3 embedding model for older checkpoints'
+        'description': 'Qwen3 8B embedding model configuration'
     },
     'qwen3-embedding-0.6b': {
         'name': 'Qwen/Qwen3-Embedding-0.6B',
         'hidden_size': 1024,
-        'description': 'Lightweight legacy embedding model for local smoke tests'
+        'description': 'Compact Qwen3 embedding model configuration'
     }
 }
 
@@ -40,7 +38,7 @@ VISION_MODELS = {
     'qwen2.5-vl-72b-instruct': {
         'name': 'Qwen/Qwen2.5-VL-72B-Instruct',
         'hidden_size': 8192,
-        'description': 'Qwen2.5-VL-72B-Instruct diet image and text encoder from the manuscript'
+        'description': 'Qwen2.5-VL-72B-Instruct diet image and text encoder'
     },
     'qwen3-vl-embedding-8b': {
         'name': 'Qwen/Qwen3-VL-Embedding-8B',
@@ -55,8 +53,8 @@ VISION_MODELS = {
 }
 
 # Default model configurations
-DEFAULT_TEXT_MODEL = 'qwen3-8b'  # Manuscript exercise/physiology text encoder
-DEFAULT_VISION_MODEL = 'qwen2.5-vl-72b-instruct'  # Manuscript diet VLM
+DEFAULT_TEXT_MODEL = 'qwen3-8b'  # Exercise/physiology text encoder
+DEFAULT_VISION_MODEL = 'qwen2.5-vl-72b-instruct'  # Diet image/text encoder
 
 # Model parameter configurations
 MODEL_CONFIGS = {

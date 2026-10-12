@@ -20,9 +20,9 @@ def get_embedding_model():
     local_model_path = config.get("local_emb_path", None)
 
     if local_model_path and os.path.exists(local_model_path):
-        _embedding_model = SentenceTransformer(local_model_path)
+        _embedding_model = SentenceTransformer(local_model_path, local_files_only=True)
     else:
-        _embedding_model = SentenceTransformer('moka-ai/m3e-base')
+        raise ValueError('Set local_emb_path to an existing local embedding model directory.')
 
     _embedding_dim = _embedding_model.get_sentence_embedding_dimension()
     return _embedding_model
@@ -38,6 +38,16 @@ class KnowledgeGraphQuery:
 
     def __init__(self, client: Optional[Neo4jClient] = None):
         self.client = client or get_neo4j()
+
+    def search_exact_entities(self, name: str) -> List[Dict[str, Any]]:
+        """Case-insensitive exact entity name; parameters are never interpolated."""
+        return self._safe_query("""
+            MATCH (head)-[r]-(tail)
+            WHERE toLower(head.name) = toLower($name)
+            RETURN head.name AS head, type(r) AS rel_type, tail.name AS tail,
+                   coalesce(r.condition, r.context, '') AS condition
+            LIMIT 40
+        """, {"name": name})
 
     # dietary querires
 

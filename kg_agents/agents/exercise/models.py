@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from enum import Enum
 
 
@@ -39,6 +39,11 @@ class ExerciseItem(BaseModel):
         description="Duration in minutes (1-180)"
     )
     intensity: IntensityLevel = Field(..., description="Exercise intensity")
+    MET: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("MET", "met"),
+        description="Metabolic equivalent of task"
+    )
     calories_burned: int = Field(
         ...,
         ge=0,
@@ -106,6 +111,10 @@ class ExercisePlan(BaseModel):
     meal_timing: MealTiming = Field(
         ...,
         description="When to exercise relative to meals"
+    )
+    start_minutes_after_meal: Optional[float] = Field(
+        None,
+        description="Exercise start in minutes relative to meal start"
     )
     sessions: Dict[str, ExerciseSession] = Field(
         ...,

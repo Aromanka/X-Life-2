@@ -6,41 +6,14 @@ from torch.utils.data import Dataset
 from datetime import datetime
 
 
-class _FallbackTokenizer:
-    """Small deterministic tokenizer used when model weights are unavailable."""
-
-    def __call__(self, text, max_length=512, padding='max_length', truncation=True,
-                 return_tensors='pt'):
-        import hashlib
-        import torch
-        token_count = min(max_length, max(1, len(str(text).split())))
-        digest = hashlib.sha256(str(text).encode('utf-8')).digest()
-        ids = [int(digest[i % len(digest)]) + 1 for i in range(token_count)]
-        if padding == 'max_length' and token_count < max_length:
-            ids += [0] * (max_length - token_count)
-        mask = [1] * token_count + [0] * (max_length - token_count)
-        result = {'input_ids': torch.tensor([ids], dtype=torch.long),
-                  'attention_mask': torch.tensor([mask], dtype=torch.long)}
-        return result
-
-
-def get_tokenizer(model_key=None, use_mirror=True):
-    """Load the tokenizer matching the configured text model.
-
-    The model key is resolved through ``model_config`` so tokenizer and model
-    cannot silently point at different checkpoints.  A deterministic fallback
-    keeps the lightweight sample pipeline runnable without downloading weights.
-    """
-    try:
-        from transformers import AutoTokenizer
-        from model_config import get_model_config
-        model_name = get_model_config(model_key)['name']
-        if use_mirror:
-            os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
-        return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    except Exception as exc:
-        print(f"Tokenizer unavailable; using deterministic fallback: {exc}")
-        return _FallbackTokenizer()
+def get_tokenizer(model_key=None, use_mirror=False, model_path=None):
+    """Load the tokenizer from an explicit local model path, without downloads."""
+    from transformers import AutoTokenizer
+    path = model_path or model_key
+    if not path or not os.path.isdir(os.path.expanduser(str(path))):
+        raise ValueError("Set model_path to the local Qwen3 model directory.")
+    return AutoTokenizer.from_pretrained(os.path.expanduser(str(path)),
+                                       local_files_only=True, trust_remote_code=True)
 
 
 class SampleImageDataset(Dataset):
@@ -65,6 +38,10 @@ class SampleImageDataset(Dataset):
         """Load and process data"""
         with open(self.data_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+
+        if data and 'cgm_pre' in data[0]:
+            self.samples = data
+            return
         
         print(f"Loaded data for {len(data)} patients")
         
@@ -90,26 +67,28 @@ class SampleImageDataset(Dataset):
                 }
                 self.samples.append(sample)
 
-            # Newer minimal/research bundles may contain exercise events that
+            # Patient records may contain exercise events that
             # are not attached to a meal. Preserve those trajectories as
             # first-class samples instead of silently dropping a participant
             # who has exercise data but no meal record.
             for exercise_event in patient.get('exercise_events', []):
                 cgm_pre = exercise_event.get('cgm_pre_exercise', [])
                 cgm_post = exercise_event.get('cgm_post_exercise', [])
-                if not cgm_pre or not cgm_post:
+                if (not cgm_pre or not cgm_post) and not exercise_event.get('training_annotations'):
                     continue
                 self.samples.append({
                     'subject_id': subject_id,
                     'subject_name': subject_name,
                     'metadata': metadata,
-                    'food_data': {},
+                    'food_data': exercise_event.get('food_data', {}),
                     'exercise_data': exercise_event,
-                    'sleep_data': {},
+                    'sleep_data': exercise_event.get('sleep_data', {}),
                     'cgm_pre': cgm_pre,
                     'cgm_post': cgm_post,
                     'cgm_type': 'exercise',
-                    'event_id': exercise_event.get('event_id', '')
+                    'event_id': exercise_event.get('event_id', ''),
+                    'training_annotations': exercise_event.get('training_annotations', {}),
+                    'training_targets': exercise_event.get('training_targets', {}),
                 })
                 continue
             
@@ -139,7 +118,10 @@ class SampleImageDataset(Dataset):
                     'sleep_data': sleep_data,
                     'cgm_pre': cgm_pre,
                     'cgm_post': cgm_post,
-                    'cgm_type': cgm_type
+                    'cgm_type': cgm_type,
+                    'event_id': meal.get('event_id', food_data.get('food_id', '')),
+                    'training_annotations': meal.get('training_annotations', {}),
+                    'training_targets': meal.get('training_targets', {}),
                 }
                 
                 self.samples.append(sample)
@@ -148,6 +130,14 @@ class SampleImageDataset(Dataset):
     
     def __len__(self):
         return len(self.samples)
+
+    @classmethod
+    def from_samples(cls, samples, image_dir=None):
+        """Use normalized events without writing temporary patient JSON files."""
+        instance = cls.__new__(cls)
+        instance.data_path, instance.image_dir = None, image_dir
+        instance.samples = list(samples)
+        return instance
     
     def __getitem__(self, idx):
         """Get a single sample"""
@@ -197,6 +187,9 @@ class SampleImageDataset(Dataset):
         info['hypoglycemic_agents'] = metadata.get('Hypoglycemic Agents', 'N/A')
         info['other_agents'] = metadata.get('Other Agents', 'N/A')
         info['hypoglycemia'] = metadata.get('Hypoglycemia (yes/no)', 'N/A')
+        for key in info:
+            if key in metadata:
+                info[key] = metadata[key]
         
         return info
     
@@ -210,10 +203,15 @@ class SampleImageDataset(Dataset):
         # Basic information
         info['date'] = food_data.get('date', '')
         info['food_id'] = food_data.get('food_id', '')
+        info['meal_type'] = food_data.get('meal_type', '')
         
         # Food details
-        if 'data' in food_data:
-            food_info = food_data['data']
+        if isinstance(food_data, dict):
+            food_info = food_data.get('data', food_data)
+            for key in ('description', 'ingredients', 'preparation', 'preparation_method',
+                        'nutrition', 'nutrients', 'carbohydrate_g', 'protein_g', 'fat_g', 'fiber_g'):
+                if key in food_info:
+                    info[key] = food_info[key]
             
             # Meal time
             info['time'] = food_info.get('time', '')
@@ -224,6 +222,7 @@ class SampleImageDataset(Dataset):
             image_paths = []
             
             for item in food_items:
+                img_path = ''
                 # For image-based data, extract image path
                 img_name = item.get('img_names', '')
                 if img_name:
@@ -235,6 +234,9 @@ class SampleImageDataset(Dataset):
                     image_paths.append(img_path)
                 
                 foods.append({
+                    **{key: item[key] for key in ('food', 'food_name', 'name', 'portion',
+                         'portion_number', 'portion_unit', 'weight', 'weight_g', 'nutrition',
+                         'nutrients', 'ingredients', 'preparation') if key in item},
                     'image_name': img_name,
                     'image_path': img_path if 'img_path' in locals() else img_name
                 })
@@ -254,8 +256,12 @@ class SampleImageDataset(Dataset):
         
         info = {
             'has_exercise': True,
-            'exercise_type': exercise_data.get('type', 'Unknown'),
+            'exercise_type': exercise_data.get('type', exercise_data.get('exercise_type', 'Unknown')),
             'duration': exercise_data.get('duration', 0),
+            'intensity': exercise_data.get('intensity', exercise_data.get('intensity_level')),
+            'MET': exercise_data.get('MET', exercise_data.get('met', exercise_data.get('metabolic_equivalents'))),
+            'meal_timing': exercise_data.get('meal_timing'),
+            'start_minutes_after_meal': exercise_data.get('start_minutes_after_meal'),
             'calories': exercise_data.get('calories', 0),
             'heart_rate': exercise_data.get('heart_rate', None),
             'recorded_at': exercise_data.get('recorded_at', ''),
@@ -271,6 +277,8 @@ class SampleImageDataset(Dataset):
         
         # Handle the case where sleep_data is a dictionary with date keys
         if isinstance(sleep_data, dict):
+            if 'total_sleep_duration' in sleep_data or 'sleep_onset_time' in sleep_data:
+                return dict(sleep_data)
             # Get the first (and likely only) date entry
             if sleep_data:
                 date_key = list(sleep_data.keys())[0]
@@ -345,7 +353,7 @@ class SampleImageDataset(Dataset):
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize the repository's bundled minimal fixture.  Resolve paths
+    # Initialize the bundled minimal dataset. Resolve paths
     # relative to this file rather than relying on a machine-specific path.
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     data_path = os.path.join(repo_root, 'minimal_dataset', 'sample_data.json')

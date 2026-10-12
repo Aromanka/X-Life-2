@@ -1,10 +1,11 @@
 cff-version: 1.2.0
-title: "xlife"
+message: "If you use this software, please cite the X-Life manuscript."
+title: "X-Life"
 authors:
   - family-names: Wu
     given-names: Qian
   - family-names: Qin
     given-names: Yiming
 version: 1.0.0
-date-released: 2026-02-013
-url: https://github.com/2025XLife/Project-01.git
+license: MIT
+url: https://github.com/2025XLife/Project-01

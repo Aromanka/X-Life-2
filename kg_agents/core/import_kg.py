@@ -230,7 +230,7 @@ def main():
     print("Neo4j KG import:")
 
     with driver.session() as session:
-        print("\Choose mode:")
+        print("Choose mode:")
         print("1. Import from output_history folder")
         print("2. Import from specific folder")
         print("3. Show database statistics")

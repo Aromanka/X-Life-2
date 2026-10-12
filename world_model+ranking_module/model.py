@@ -1,1102 +1,516 @@
-import os
-import torch
-import torch.nn as nn
-from transformers import AutoModel, AutoTokenizer, AutoProcessor
+"""X-Life action-conditioned world model.
+
+Local Qwen interfaces, patchified CGM, Transformer transitions and trajectories,
+and a shared ranking/CGM path. Architecture and training objectives are
+documented in docs/METHOD.md.
+"""
+from __future__ import annotations
+
 import math
-from PIL import Image
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
-from hf_mirror_config import with_hf_mirror, enable_hf_mirror
+import torch
+from torch import nn
+from torch.nn import functional as F
+from PIL import Image
+from transformers import AutoModel, AutoProcessor
 
-# Global enable HF mirror
-enable_hf_mirror()
 
-class SimpleLanguageModel(nn.Module):
-    """Simple language model as backup for pre-trained models"""
+def local_model_directory(path, label):
+    if not path or not Path(path).expanduser().is_dir():
+        raise ValueError(f"Set {label} to an existing local Qwen model directory.")
+    return str(Path(path).expanduser().resolve())
 
-    def __init__(self, vocab_size=21128, hidden_size=768, num_layers=6, num_heads=12):
-        super(SimpleLanguageModel, self).__init__()
 
-        self.config = type('Config', (), {
-            'hidden_size': hidden_size,
-            'vocab_size': vocab_size
-        })()
+def hidden_size(config):
+    size = getattr(config, "hidden_size", None)
+    if size is None:
+        size = getattr(getattr(config, "text_config", None), "hidden_size", None)
+    if size is None:
+        raise ValueError("The local model config must expose a text hidden_size.")
+    return int(size)
 
-        self.embedding = nn.Embedding(vocab_size, hidden_size)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size,
-            nhead=num_heads,
-            dim_feedforward=hidden_size * 4,
-            dropout=0.1,
-            activation='gelu',
-            batch_first=True
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-    def forward(self, input_ids, attention_mask=None):
-        embeddings = self.embedding(input_ids)
+def masked_token_mean(hidden, mask=None):
+    if mask is None:
+        return hidden.mean(dim=1)
+    weights = mask.to(device=hidden.device, dtype=hidden.dtype).unsqueeze(-1)
+    return (hidden * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
 
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
 
-        src_key_padding_mask = (attention_mask == 0)
+def causal_mask(length, device, memory_length=None):
+    columns = length if memory_length is None else memory_length
+    return torch.arange(columns, device=device).unsqueeze(0) > torch.arange(length, device=device).unsqueeze(1)
 
-        encoded = self.encoder(embeddings, src_key_padding_mask=src_key_padding_mask)
-
-        return type('Output', (), {'last_hidden_state': encoded})()
 
 class TextEncoder(nn.Module):
-    """Text encoder using pre-trained language models to encode metadata, sleep data and food data"""
+    """Local Qwen3 encoder shared by physiological and exercise text."""
 
-    def __init__(self, model_key=None, hidden_dim=256, use_mirror=True, qwen_model_path=None):
-        """
-        Initialize text encoder
-
-        Args:
-            model_key: Pre-trained language model key
-            hidden_dim: Hidden layer dimension
-            use_mirror: Whether to use HF mirror
-            qwen_model_path: Local path for Qwen model
-        """
-        super(TextEncoder, self).__init__()
-
-        self.use_mirror = use_mirror
+    def __init__(self, model_key=None, hidden_dim=256, use_mirror=False,
+                 qwen_model_path=None, language_model=None):
+        super().__init__()
         self.hidden_dim = hidden_dim
-
-        try:
-            from model_config import get_model_config
-            config = get_model_config(model_key)
-            model_name = config['name']
-        except:
-            model_name = 'bert-base-chinese'
-
-        if use_mirror:
-            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
-        try:
-            if qwen_model_path is not None:
-                self.language_model = AutoModel.from_pretrained(qwen_model_path, trust_remote_code=True)
-                print(f"Loading text model from provided local path: {qwen_model_path}")
-            elif 'Embedding' in model_name:
-                if 'Qwen3-Embedding' in model_name:
-                    try:
-                        from huggingface_hub import snapshot_download
-                        local_path = snapshot_download(
-                            repo_id=model_name,
-                            endpoint='https://hf-mirror.com'
-                        )
-                        self.language_model = AutoModel.from_pretrained(local_path, trust_remote_code=True)
-                        print(f"Loading embedding model from local path: {local_path}")
-                    except:
-                        self.language_model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-                        print(f"Downloading embedding model using HF mirror: {model_name}")
-                else:
-                    self.language_model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
-                    print(f"Downloading embedding model using HF mirror: {model_name}")
-            else:
-                self.language_model = AutoModel.from_pretrained(model_name)
-                print(f"Downloading model using HF mirror: {model_name}")
-        except Exception as e:
-            print(f"Failed to load pre-trained model {model_name}: {str(e)}")
-            self.language_model = SimpleLanguageModel(
-                vocab_size=21128,
-                hidden_size=768,
-                num_layers=6,
-                num_heads=12
+        if language_model is None:
+            path = local_model_directory(qwen_model_path, "qwen_model_path")
+            language_model = AutoModel.from_pretrained(
+                path, local_files_only=True, trust_remote_code=True, torch_dtype="auto"
             )
+        self.language_model = language_model
+        size = hidden_size(language_model.config)
+        for name in ("metadata", "sleep", "food", "exercise"):
+            setattr(self, name + "_projection", nn.Sequential(
+                nn.Linear(size, hidden_dim), nn.ReLU(), nn.Dropout(0.1),
+                nn.Linear(hidden_dim, hidden_dim)
+            ))
 
-        lm_hidden_dim = self.language_model.config.hidden_size
-
-        self.metadata_projection = nn.Sequential(
-            nn.Linear(lm_hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-
-        self.sleep_projection = nn.Sequential(
-            nn.Linear(lm_hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-
-        self.food_projection = nn.Sequential(
-            nn.Linear(lm_hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-
-        self.exercise_projection = nn.Sequential(
-            nn.Linear(lm_hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
+    def encode(self, input_ids, attention_mask, kind):
+        projection = getattr(self, kind + "_projection")
+        device = next(self.language_model.parameters()).device
+        outputs = self.language_model(input_ids=input_ids.to(device),
+                                      attention_mask=attention_mask.to(device), use_cache=False)
+        summary = masked_token_mean(outputs.last_hidden_state, attention_mask)
+        parameter = next(projection.parameters())
+        return projection(summary.to(device=parameter.device, dtype=parameter.dtype))
 
     def forward(self, metadata_input_ids, metadata_attention_mask,
-                sleep_input_ids, sleep_attention_mask,
-                food_input_ids, food_attention_mask,
-                exercise_input_ids=None, exercise_attention_mask=None):
-        """
-        Forward pass
-
-        Args:
-            metadata_input_ids: Metadata input token IDs [batch_size, seq_len]
-            metadata_attention_mask: Metadata attention mask [batch_size, seq_len]
-            sleep_input_ids: Sleep data input token IDs [batch_size, seq_len]
-            sleep_attention_mask: Sleep data attention mask [batch_size, seq_len]
-            food_input_ids: Food data input token IDs [batch_size, seq_len]
-            food_attention_mask: Food data attention mask [batch_size, seq_len]
-            exercise_input_ids: Exercise data input token IDs [batch_size, seq_len]
-            exercise_attention_mask: Exercise data attention mask [batch_size, seq_len]
-
-        Returns:
-            encoded_metadata: Encoded metadata features [batch_size, hidden_dim]
-            encoded_sleep: Encoded sleep data features [batch_size, hidden_dim]
-            encoded_food: Encoded food data features [batch_size, hidden_dim]
-            encoded_exercise: Encoded exercise data features [batch_size, hidden_dim]
-        """
-        def pool_valid_tokens(outputs, attention_mask):
-            """Pool all non-padding token states.
-
-            The Qwen checkpoints use a causal mask, so position zero is not a
-            CLS token and cannot summarize text that follows it.  A masked mean
-            keeps every valid token while excluding left/right padding and also
-            works with the small fallback language model used in tests.
-            """
-            hidden = outputs.last_hidden_state
-            if attention_mask is None:
-                return hidden.mean(dim=1)
-            weights = attention_mask.to(device=hidden.device, dtype=hidden.dtype).unsqueeze(-1)
-            return (hidden * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
-
-        metadata_outputs = self.language_model(
-            input_ids=metadata_input_ids,
-            attention_mask=metadata_attention_mask
-        )
-        metadata_summary = pool_valid_tokens(metadata_outputs, metadata_attention_mask)
-        encoded_metadata = self.metadata_projection(metadata_summary)
-
-        sleep_outputs = self.language_model(
-            input_ids=sleep_input_ids,
-            attention_mask=sleep_attention_mask
-        )
-        sleep_summary = pool_valid_tokens(sleep_outputs, sleep_attention_mask)
-        encoded_sleep = self.sleep_projection(sleep_summary)
-
-        food_outputs = self.language_model(
-            input_ids=food_input_ids,
-            attention_mask=food_attention_mask
-        )
-        food_summary = pool_valid_tokens(food_outputs, food_attention_mask)
-        encoded_food = self.food_projection(food_summary)
-
-        # Encode exercise data
-        if exercise_input_ids is not None and exercise_attention_mask is not None:
-            exercise_outputs = self.language_model(
-                input_ids=exercise_input_ids,
-                attention_mask=exercise_attention_mask
-            )
-            exercise_summary = pool_valid_tokens(exercise_outputs, exercise_attention_mask)
-            encoded_exercise = self.exercise_projection(exercise_summary)
+                sleep_input_ids, sleep_attention_mask, food_input_ids,
+                food_attention_mask, exercise_input_ids=None, exercise_attention_mask=None):
+        metadata = self.encode(metadata_input_ids, metadata_attention_mask, "metadata")
+        sleep = self.encode(sleep_input_ids, sleep_attention_mask, "sleep")
+        food = self.encode(food_input_ids, food_attention_mask, "food")
+        if exercise_input_ids is None:
+            exercise = metadata.new_zeros(metadata.size(0), self.hidden_dim)
         else:
-            batch_size = metadata_input_ids.size(0)
-            encoded_exercise = torch.zeros(batch_size, self.hidden_dim).to(metadata_input_ids.device)
+            exercise = self.encode(exercise_input_ids, exercise_attention_mask, "exercise")
+        return metadata, sleep, food, exercise
 
-        return encoded_metadata, encoded_sleep, encoded_food, encoded_exercise
-
-class PositionalEncoding(nn.Module):
-    """Positional encoding"""
-
-    def __init__(self, d_model, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return x + self.pe[:x.size(0), :]
-
-class CGMTransformerEncoder(nn.Module):
-    """Transformer encoder for CGM data"""
-
-    def __init__(self, input_dim=1, d_model=128, nhead=8, num_layers=3, dim_feedforward=512, dropout=0.1):
-        """
-        Initialize CGM Transformer encoder
-
-        Args:
-            input_dim: Input feature dimension (CGM value is 1)
-            d_model: Model dimension
-            nhead: Number of attention heads
-            num_layers: Number of Transformer layers
-            dim_feedforward: Feed-forward network dimension
-            dropout: Dropout rate
-        """
-        super(CGMTransformerEncoder, self).__init__()
-
-        self.d_model = d_model
-
-        self.input_projection = nn.Linear(input_dim, d_model)
-
-        self.pos_encoder = PositionalEncoding(d_model)
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-    def forward(self, cgm_sequence, attention_mask=None):
-        """
-        Forward pass
-
-        Args:
-            cgm_sequence: CGM sequence [batch_size, seq_len]
-            attention_mask: 1 for measured points and 0 for padding [batch_size, seq_len]
-
-        Returns:
-            encoded_cgm: Encoded CGM features [batch_size, seq_len, d_model]
-        """
-        cgm_sequence = cgm_sequence.unsqueeze(-1)
-
-        x = self.input_projection(cgm_sequence)
-
-        x = x.transpose(0, 1)
-
-        x = self.pos_encoder(x)
-
-        x = x.transpose(0, 1)
-
-        key_padding_mask = None
-        if attention_mask is not None:
-            valid_mask = attention_mask.to(device=x.device, dtype=torch.bool)
-            key_padding_mask = ~valid_mask
-            # PyTorch's attention can produce NaNs when every position in a
-            # row is masked.  Keep an all-zero placeholder row unmasked; the
-            # caller's masked pooling/loss still excludes it from learning.
-            empty_rows = ~valid_mask.any(dim=1)
-            if empty_rows.any():
-                key_padding_mask = key_padding_mask.clone()
-                key_padding_mask[empty_rows] = False
-        encoded_cgm = self.transformer_encoder(x, src_key_padding_mask=key_padding_mask)
-
-        return encoded_cgm
-
-class CGMTransformerDecoder(nn.Module):
-    """Transformer decoder for CGM data, used to predict postprandial CGM"""
-
-    def __init__(self, d_model=128, output_dim=1, nhead=8, num_layers=3, dim_feedforward=512, dropout=0.1):
-        """
-        Initialize CGM Transformer decoder
-
-        Args:
-            d_model: Model dimension
-            output_dim: Output dimension (CGM value is 1)
-            nhead: Number of attention heads
-            num_layers: Number of Transformer layers
-            dim_feedforward: Feed-forward network dimension
-            dropout: Dropout rate
-        """
-        super(CGMTransformerDecoder, self).__init__()
-
-        self.d_model = d_model
-
-        self.pos_encoder = PositionalEncoding(d_model)
-
-        # CGM values are scalars; project them before adding d_model-wide
-        # positional encodings.  This also makes teacher forcing and
-        # autoregressive inference use exactly the same representation.
-        self.target_input_projection = nn.Linear(output_dim, d_model)
-
-        # Transformer decoder layer
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-
-        self.output_projection = nn.Linear(d_model, output_dim)
-
-    def forward(self, encoded_cgm, encoded_text, target_sequence=None, target_len=None):
-        """
-        Forward pass
-
-        Args:
-            encoded_cgm: Encoded CGM features [batch_size, seq_len, d_model]
-            encoded_text: Future-state context [batch_size, d_model] or a
-                latent rollout [batch_size, horizon, d_model]
-            target_sequence: Target sequence (used during training) [batch_size, target_len, 1]
-            target_len: Inference horizon when ``target_sequence`` is absent.
-
-        Returns:
-            predicted_cgm: Predicted CGM sequence [batch_size, target_len, 1]
-        """
-        batch_size = encoded_cgm.size(0)
-        seq_len = encoded_cgm.size(1)
-
-        if target_sequence is not None:
-            target_len = target_sequence.size(1)
-
-            # Teacher forcing uses only the start token and targets strictly
-            # before the current position.  The target at t is therefore
-            # never available when predicting y_t.
-            decoder_inputs = torch.zeros_like(target_sequence)
-            if target_len > 1:
-                decoder_inputs[:, 1:, :] = target_sequence[:, :-1, :]
-            target_embedding = self.target_input_projection(decoder_inputs)
-            target_embedding = self.pos_encoder(target_embedding.transpose(0, 1)).transpose(0, 1)
-
-            if encoded_text.dim() == 2:
-                memory = encoded_text.unsqueeze(1).expand(-1, target_len, -1)
-            elif encoded_text.dim() == 3:
-                # Preserve every learned transition step as cross-attention
-                # memory.  The decoder can therefore use the complete latent
-                # trajectory instead of only the final state.
-                memory = encoded_text
-            else:
-                raise ValueError("encoded_text must have shape [B,D] or [B,H,D]")
-            causal_mask = torch.triu(
-                torch.ones(target_len, target_len, device=target_embedding.device, dtype=torch.bool),
-                diagonal=1,
-            )
-            decoded = self.transformer_decoder(
-                tgt=target_embedding,
-                memory=memory,
-                tgt_mask=causal_mask,
-            )
-
-            predicted_cgm = self.output_projection(decoded)
-
-        else:
-            target_len = seq_len if target_len is None else int(target_len)
-            if target_len < 1:
-                raise ValueError("target_len must be >= 1")
-
-            output_sequence = torch.zeros(batch_size, target_len, 1, device=encoded_cgm.device)
-
-            for i in range(target_len):
-                current_seq = output_sequence[:, :i+1, :]
-
-                current_seq = self.target_input_projection(current_seq)
-                current_seq = self.pos_encoder(current_seq.transpose(0, 1)).transpose(0, 1)
-
-                if encoded_text.dim() == 2:
-                    memory = encoded_text.unsqueeze(1).expand(-1, i+1, -1)
-                elif encoded_text.dim() == 3:
-                    # At inference step i, only states up to i are visible;
-                    # exposing the full rollout here would leak future latent
-                    # states into earlier glucose predictions.
-                    memory = encoded_text[:, :i + 1, :]
-                else:
-                    raise ValueError("encoded_text must have shape [B,D] or [B,H,D]")
-
-                decoded = self.transformer_decoder(
-                    tgt=current_seq,
-                    memory=memory
-                )
-
-                next_value = self.output_projection(decoded[:, -1:, :])
-                output_sequence[:, i:i+1, :] = next_value
-
-            predicted_cgm = output_sequence
-
-        return predicted_cgm
 
 class ImageEncoder(nn.Module):
-    """Image encoder for the configured diet vision-language model.
+    """Joint image/text diet encoder using a locally deployed Qwen2.5-VL."""
 
-    The public demo can still use ``cnn-backup``.  For research runs the
-    configuration resolves to the full Qwen2.5-VL-72B-Instruct repository id,
-    and an already downloaded local directory is preferred when supplied.
-    """
-
-    def __init__(self, model_name="Qwen/Qwen2.5-VL-72B-Instruct", hidden_dim=256,
-                 use_mirror=True, force_cnn=False, model_path=None):
-        """
-        Initialize image encoder
-
-        Args:
-            model_name: Pre-trained vision-language model name
-            hidden_dim: Hidden layer dimension
-            use_mirror: Whether to use HF mirror
-            force_cnn: Whether to force use CNN (don't try to load vision model)
-        """
-        super(ImageEncoder, self).__init__()
-
-        self.use_mirror = use_mirror
-        self.force_cnn = force_cnn
-        self.model_path = model_path
-
-        # Accept either a short config key or a full repository id.  Passing a
-        # short key directly to from_pretrained() was the source of the old
-        # Qwen3-VL/embedding mismatch.
-        try:
-            from model_config import VISION_MODELS, get_vision_model_config
-            if model_name in VISION_MODELS:
-                resolved = get_vision_model_config(model_name)
-                model_name = resolved['name']
-                if model_name == 'CNN Backup':
-                    force_cnn = True
-        except Exception:
-            pass
-        self.force_cnn = force_cnn
-        self.model_name = model_name
-
-        if use_mirror:
-            os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
+    def __init__(self, model_name=None, hidden_dim=256, use_mirror=False,
+                 force_cnn=False, model_path=None, vision_model=None, processor=None):
+        super().__init__()
         if force_cnn:
-            print("Force using CNN encoder")
-            self.vision_model = None
-            self.processor = None
-            vision_hidden_dim = 512
-            self._init_cnn_encoder(vision_hidden_dim, hidden_dim)
-        else:
-            try:
-                load_name = model_path or model_name
-                print(f"Loading vision-language model: {load_name}")
-                import socket
-                socket.setdefaulttimeout(5)
+            raise ValueError("Diet encoding requires a joint vision-language model.")
+        if vision_model is None:
+            path = local_model_directory(model_path, "vision_model_path")
+            vision_model = AutoModel.from_pretrained(
+                path, local_files_only=True, trust_remote_code=True, torch_dtype="auto"
+            )
+            processor = AutoProcessor.from_pretrained(path, local_files_only=True, trust_remote_code=True)
+        if processor is None:
+            raise ValueError("A processor is required with a supplied vision model.")
+        self.vision_model, self.processor = vision_model, processor
+        self.image_projection = nn.Sequential(nn.Linear(hidden_size(vision_model.config), hidden_dim),
+                                              nn.ReLU(), nn.Dropout(0.1), nn.Linear(hidden_dim, hidden_dim))
 
-                self.vision_model = AutoModel.from_pretrained(
-                    load_name,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16,
-                    local_files_only=False
-                )
-                self.processor = AutoProcessor.from_pretrained(
-                    load_name,
-                    trust_remote_code=True,
-                    local_files_only=False
-                )
-                print(f"Successfully loaded vision-language model: {load_name}")
+    @staticmethod
+    def _pil_image(value):
+        if value is None or isinstance(value, Image.Image):
+            return value
+        if not isinstance(value, torch.Tensor) or value.ndim != 3:
+            raise TypeError("Diet images must be PIL images, normalized CHW tensors, or None.")
+        # The dataset's tensors use ImageNet normalization. PIL inputs are unchanged.
+        tensor = value.detach().float().cpu()
+        mean = tensor.new_tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std = tensor.new_tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        rgb = (tensor * std + mean).clamp(0, 1)
+        return Image.fromarray((rgb.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
 
-                if hasattr(self.vision_model.config, 'hidden_size'):
-                    vision_hidden_dim = self.vision_model.config.hidden_size
-                elif hasattr(self.vision_model, 'visual') and hasattr(self.vision_model.visual.config, 'hidden_size'):
-                    vision_hidden_dim = self.vision_model.visual.config.hidden_size
-                else:
-                    vision_hidden_dim = 1024
+    def forward(self, images, texts):
+        if texts is None or len(texts) != len(images):
+            raise ValueError("Supply one dietary description for each sample.")
+        prompts, pil_images = [], []
+        for value, text in zip(images, texts):
+            image = self._pil_image(value)
+            content = []
+            if image is not None:
+                content.append({"type": "image"})
+                pil_images.append(image)
+            content.append({"type": "text", "text": str(text) or "No dietary information"})
+            prompts.append(self.processor.apply_chat_template(
+                [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=False
+            ))
+        kwargs = dict(text=prompts, padding=True, return_tensors="pt")
+        if pil_images:
+            kwargs["images"] = pil_images
+        inputs = self.processor(**kwargs)
+        parameter = next(self.vision_model.parameters())
+        inputs = {key: value.to(device=parameter.device,
+                               dtype=parameter.dtype if value.is_floating_point() else value.dtype)
+                  for key, value in inputs.items()}
+        outputs = self.vision_model(**inputs, use_cache=False)
+        summary = masked_token_mean(outputs.last_hidden_state, inputs.get("attention_mask"))
+        projection_parameter = next(self.image_projection.parameters())
+        return self.image_projection(summary.to(device=projection_parameter.device,
+                                                dtype=projection_parameter.dtype))
 
-            except (Exception, socket.timeout) as e:
-                print(f"Failed to load vision-language model {model_name}: {str(e)}")
-                print("Network unavailable or model loading failed, using CNN encoder")
-                self.vision_model = None
-                self.processor = None
-                vision_hidden_dim = 512
-                self._init_cnn_encoder(vision_hidden_dim, hidden_dim)
 
-        self.image_projection = nn.Sequential(
-            nn.Linear(vision_hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim)
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        position = torch.arange(max_len, dtype=torch.float).unsqueeze(1)
+        frequencies = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        encoding = torch.zeros(max_len, d_model)
+        encoding[:, 0::2] = torch.sin(position * frequencies)
+        encoding[:, 1::2] = torch.cos(position * frequencies[:encoding[:, 1::2].size(1)])
+        self.register_buffer("pe", encoding.unsqueeze(1))
+
+    def forward(self, sequence):
+        if sequence.size(0) > self.pe.size(0):
+            raise ValueError("Sequence exceeds the configured positional encoding length.")
+        return sequence + self.pe[:sequence.size(0)].to(dtype=sequence.dtype)
+
+
+def transformer_encoder(dimension, heads, layers, dropout, feedforward=None):
+    if dimension % heads:
+        raise ValueError("Transformer state dimension must be divisible by its number of heads.")
+    layer = nn.TransformerEncoderLayer(d_model=dimension, nhead=heads,
+                                      dim_feedforward=feedforward or dimension * 4,
+                                      dropout=dropout, activation="gelu", batch_first=True)
+    return nn.TransformerEncoder(layer, num_layers=layers, enable_nested_tensor=False)
+
+
+class CGMTransformerEncoder(nn.Module):
+    """Non-overlapping CGM patches with explicit within-patch validity bits."""
+    def __init__(self, input_dim=1, d_model=128, nhead=4, num_layers=2,
+                 dim_feedforward=512, dropout=0.1, patch_size=6):
+        super().__init__()
+        if input_dim != 1 or patch_size < 1:
+            raise ValueError("CGM is scalar-valued and patch_size must be positive.")
+        self.d_model, self.patch_size = d_model, int(patch_size)
+        self.input_projection = nn.Linear(self.patch_size * 2, d_model)
+        self.pos_encoder = PositionalEncoding(d_model)
+        self.transformer_encoder = transformer_encoder(d_model, nhead, num_layers, dropout, dim_feedforward)
+
+    def patchify(self, cgm_sequence, attention_mask=None):
+        if cgm_sequence.ndim != 2 or cgm_sequence.size(1) < 1:
+            raise ValueError("CGM must have shape [batch, nonempty time].")
+        valid = torch.isfinite(cgm_sequence)
+        if attention_mask is not None:
+            if attention_mask.shape != cgm_sequence.shape:
+                raise ValueError("CGM values and masks must have the same shape.")
+            valid = valid & attention_mask.to(device=cgm_sequence.device, dtype=torch.bool)
+        values = torch.where(valid, cgm_sequence, torch.zeros_like(cgm_sequence))
+        padding = (-values.size(1)) % self.patch_size
+        values = F.pad(values, (0, padding))
+        valid = F.pad(valid, (0, padding), value=False)
+        values = values.reshape(values.size(0), -1, self.patch_size)
+        valid = valid.reshape(valid.size(0), -1, self.patch_size)
+        return values, valid
+
+    def patch_weights(self, cgm_sequence, attention_mask=None):
+        return self.patchify(cgm_sequence, attention_mask)[1].sum(dim=-1)
+
+    def forward(self, cgm_sequence, attention_mask=None):
+        values, valid = self.patchify(cgm_sequence, attention_mask)
+        tokens = self.input_projection(torch.cat([values, valid.to(values.dtype)], dim=-1))
+        tokens = self.pos_encoder(tokens.transpose(0, 1)).transpose(0, 1)
+        padding = ~valid.any(dim=-1)
+        # Empty physiological histories have zero pooling weight. Unmask a
+        # placeholder to prevent attention over an entirely masked sequence.
+        empty = padding.all(dim=1)
+        padding = padding.clone()
+        padding[empty, 0] = False
+        return self.transformer_encoder(tokens, src_key_padding_mask=padding)
+
+
+class CGMTransformerDecoder(nn.Module):
+    def __init__(self, d_model=128, output_dim=1, nhead=4, num_layers=2,
+                 dim_feedforward=512, dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.target_input_projection = nn.Linear(output_dim, d_model)
+        self.pos_encoder = PositionalEncoding(d_model)
+        layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout,
+                                           activation="gelu", batch_first=True)
+        self.transformer_decoder = nn.TransformerDecoder(layer, num_layers)
+        self.output_projection = nn.Linear(d_model, output_dim)
+
+    def _decode(self, decoder_inputs, memory):
+        length = decoder_inputs.size(1)
+        embedded = self.target_input_projection(decoder_inputs)
+        embedded = self.pos_encoder(embedded.transpose(0, 1)).transpose(0, 1)
+        decoded = self.transformer_decoder(
+            embedded, memory, tgt_mask=causal_mask(length, embedded.device),
+            memory_mask=causal_mask(length, embedded.device, memory.size(1))
         )
+        return self.output_projection(decoded)
 
-    def _init_cnn_encoder(self, vision_hidden_dim, hidden_dim):
-        """Initialize CNN encoder"""
-        self.cnn_encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(256, vision_hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        print("Using simple CNN encoder")
-
-    def forward(self, images):
-        """
-        Forward pass
-
-        Args:
-            images: List of image tensors or PIL images
-
-        Returns:
-            encoded_images: Encoded image features [batch_size, hidden_dim]
-        """
-        batch_size = len(images)
-
-        if self.vision_model is not None and self.processor is not None:
-            try:
-                if isinstance(images[0], torch.Tensor):
-                    pil_images = []
-                    # ``SampleImagePredictionDataset`` normalizes tensors for
-                    # the CNN path.  Restore RGB values before handing them to
-                    # the VLM processor, which performs its own preprocessing.
-                    mean = torch.tensor([0.485, 0.456, 0.406], device=images[0].device).view(3, 1, 1)
-                    std = torch.tensor([0.229, 0.224, 0.225], device=images[0].device).view(3, 1, 1)
-                    for img_tensor in images:
-                        rgb_tensor = (img_tensor * std + mean).clamp(0, 1)
-                        img_np = (rgb_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                        pil_images.append(Image.fromarray(img_np))
-                else:
-                    pil_images = images
-
-                inputs = self.processor(
-                    images=pil_images,
-                    return_tensors="pt"
-                )
-
-                device = next(self.parameters()).device
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-
-                vision_trainable = any(p.requires_grad for p in self.vision_model.parameters())
-                if vision_trainable:
-                    outputs = self.vision_model(**inputs)
-                else:
-                    with torch.no_grad():
-                        outputs = self.vision_model(**inputs)
-
-                if hasattr(outputs, 'image_embeds'):
-                    image_features = outputs.image_embeds
-                elif hasattr(outputs, 'last_hidden_state'):
-                    # Use the full image-token mean when the model exposes a
-                    # sequence, avoiding a BERT-style CLS assumption.
-                    image_features = outputs.last_hidden_state.mean(dim=1)
-                else:
-                    image_features = outputs.last_hidden_state.mean(dim=1)
-
-                if image_features.dim() == 3:
-                    image_features = image_features.mean(dim=1)
-
-            except Exception as e:
-                print(f"Vision model processing failed: {str(e)}")
-                image_features = self._fallback_process(images)
-        else:
-            image_features = self._fallback_process(images)
-
-        encoded_images = self.image_projection(image_features)
-
-        return encoded_images
-
-    def _fallback_process(self, images):
-        """Fallback processing method using simple CNN"""
-        batch_size = len(images)
-        device = next(self.parameters()).device
-
-        if isinstance(images[0], torch.Tensor):
-            image_tensors = torch.stack(images).to(device)
-            if image_tensors.max() > 1.0:
-                image_tensors = image_tensors / 255.0
-        else:
-            image_tensors = []
-            for pil_img in images:
-                tensor = torch.from_numpy(np.array(pil_img)).float() / 255.0
-                if tensor.dim() == 3:
-                    tensor = tensor.permute(2, 0, 1)
-                image_tensors.append(tensor)
-            image_tensors = torch.stack(image_tensors).to(device)
-
-        if image_tensors.shape[1] == 1:
-            image_tensors = image_tensors.repeat(1, 3, 1, 1)
-        elif image_tensors.shape[1] == 4:
-            image_tensors = image_tensors[:, :3, :, :]
-
-        image_features = self.cnn_encoder(image_tensors)
-
-        return image_features
+    def forward(self, encoded_cgm, encoded_text, target_sequence=None, target_len=None):
+        memory = encoded_text.unsqueeze(1) if encoded_text.ndim == 2 else encoded_text
+        if memory.ndim != 3:
+            raise ValueError("Decoder memory must have shape [batch, horizon, state].")
+        if target_sequence is not None:
+            inputs = torch.zeros_like(target_sequence)
+            inputs[:, 1:] = target_sequence[:, :-1]
+            return self._decode(inputs, memory)
+        horizon = memory.size(1) if target_len is None else int(target_len)
+        if horizon < 1:
+            raise ValueError("Prediction horizon must be positive.")
+        start = memory.new_zeros(memory.size(0), 1, 1)
+        history = start
+        generated = []
+        for step in range(horizon):
+            next_value = self._decode(history, memory[:, :step + 1])[:, -1:]
+            generated.append(next_value)
+            history = torch.cat([history, next_value], dim=1)
+        return torch.cat(generated, dim=1)
 
 
 class ActionTransitionModule(nn.Module):
-    """Action-conditioned latent transition with trajectory and dynamics branches."""
-
-    def __init__(self, state_dim, action_dim=None, dropout=0.1):
+    """Two-token Transformer transition, recurrent dynamics, temporal trajectory."""
+    def __init__(self, state_dim, action_dim=None, dropout=0.1, nhead=4,
+                 transition_layers=2, trajectory_layers=2):
         super().__init__()
-        # Parent action encoders may already project into the transition
-        # space.  ``None`` keeps that representation unchanged; a concrete
-        # action_dim preserves the standalone raw-action interface.
-        self.action_projection = (
-            nn.Identity() if action_dim is None else nn.Linear(action_dim, state_dim)
-        )
-        self.transition = nn.Sequential(
-            nn.Linear(state_dim * 2, state_dim),
-            nn.LayerNorm(state_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.trajectory_branch = nn.Sequential(
-            nn.Linear(state_dim, state_dim), nn.GELU(), nn.Linear(state_dim, state_dim)
-        )
+        self.action_projection = nn.Identity() if action_dim is None else nn.Linear(action_dim, state_dim)
+        self.transition = transformer_encoder(state_dim, nhead, transition_layers, dropout)
         self.dynamics_branch = nn.GRUCell(state_dim, state_dim)
+        self.trajectory_branch = transformer_encoder(state_dim, nhead, trajectory_layers, dropout)
+        self.trajectory_position = PositionalEncoding(state_dim)
+
+    def _dynamic_step(self, state, action):
+        action = self.action_projection(action)
+        tokens = torch.stack([state, action], dim=1)
+        intermediate = self.transition(tokens)[:, 0]
+        return self.dynamics_branch(intermediate, state)
+
+    def _trajectory(self, states):
+        tokens = self.trajectory_position(states.transpose(0, 1)).transpose(0, 1)
+        return self.trajectory_branch(tokens, mask=causal_mask(tokens.size(1), tokens.device))
 
     def forward(self, physiological_state, action_state):
-        action_state = self.action_projection(action_state)
-        intermediate = self.transition(torch.cat([physiological_state, action_state], dim=-1))
-        dynamic_state = self.dynamics_branch(intermediate, physiological_state)
-        trajectory_state = self.trajectory_branch(dynamic_state)
-        return dynamic_state, trajectory_state
+        dynamic = self._dynamic_step(physiological_state, action_state)
+        trajectory = self._trajectory(dynamic.unsqueeze(1))[:, 0]
+        return dynamic, trajectory
 
     def rollout(self, physiological_state, action_state, horizon=1):
-        """Roll the learned transition forward for ``horizon`` action steps.
-
-        ``action_state`` may be one action shared by every step (``[B, A]``)
-        or a sequence of actions (``[B, H, A]``).  Returning every latent
-        state makes the transition observable for counterfactual evaluation;
-        callers can use the full sequence as decoder memory or the final state
-        for scalar heads.  This is
-        intentionally a learned predictive rollout, not a causal claim:
-        identifying an intervention effect requires suitable experimental or
-        longitudinal variation in the training data.
-        """
         horizon = int(horizon)
         if horizon < 1:
-            raise ValueError("horizon must be >= 1")
-        if action_state.dim() == 2:
+            raise ValueError("horizon must be positive.")
+        if action_state.ndim == 2:
             action_state = action_state.unsqueeze(1).expand(-1, horizon, -1)
-        elif action_state.dim() == 3:
-            if action_state.size(1) != horizon:
-                raise ValueError(
-                    f"action sequence has {action_state.size(1)} steps, expected {horizon}"
-                )
-        else:
-            raise ValueError("action_state must have shape [batch, action] or [batch, steps, action]")
-
-        dynamic_states = []
-        trajectory_states = []
-        state = physiological_state
+        if action_state.ndim != 3 or action_state.size(1) != horizon:
+            raise ValueError("Action sequences must have shape [batch, horizon, action].")
+        state, states = physiological_state, []
         for step in range(horizon):
-            dynamic_state, trajectory_state = self(state, action_state[:, step, :])
-            dynamic_states.append(dynamic_state)
-            trajectory_states.append(trajectory_state)
-            state = dynamic_state
-        return torch.stack(dynamic_states, dim=1), torch.stack(trajectory_states, dim=1)
+            state = self._dynamic_step(state, action_state[:, step])
+            states.append(state)
+        dynamics = torch.stack(states, dim=1)
+        return dynamics, self._trajectory(dynamics)
 
 
 class CrossAttentionFusion(nn.Module):
-    """Fuse diet and exercise future states with cross-attention."""
-
     def __init__(self, state_dim, nhead=4, dropout=0.1):
         super().__init__()
-        if state_dim % nhead:
-            nhead = 1
         self.attention = nn.MultiheadAttention(state_dim, nhead, dropout=dropout, batch_first=True)
         self.norm = nn.LayerNorm(state_dim)
 
     def forward(self, diet_state, exercise_state):
-        diet_was_sequence = diet_state.dim() == 3
-        exercise_was_sequence = exercise_state.dim() == 3
-        diet_tokens = diet_state if diet_was_sequence else diet_state.unsqueeze(1)
-        exercise_tokens = exercise_state if exercise_was_sequence else exercise_state.unsqueeze(1)
-        attended, _ = self.attention(diet_tokens, exercise_tokens, exercise_tokens)
-        fused = self.norm(diet_tokens + attended)
-        # A one-step transition keeps the historical vector-shaped API.  For
-        # a multi-step rollout, return [B,H,D] so downstream decoder/ranker
-        # layers can attend to the full trajectory.
-        return fused if diet_was_sequence or exercise_was_sequence else fused.squeeze(1)
+        sequence = diet_state.ndim == 3
+        diet = diet_state if sequence else diet_state.unsqueeze(1)
+        exercise = exercise_state if exercise_state.ndim == 3 else exercise_state.unsqueeze(1)
+        mask = causal_mask(diet.size(1), diet.device, exercise.size(1))
+        attended, _ = self.attention(diet, exercise, exercise, attn_mask=mask, need_weights=False)
+        result = self.norm(diet + attended)
+        return result if sequence else result.squeeze(1)
 
 
 class PrescriptionRankingHead(nn.Module):
-    """Decode a future glucose proxy and a quantitative candidate score."""
-
-    def __init__(self, state_dim, max_future_len=32):
+    """Transformer comparison of current/future states and an MLP score readout."""
+    def __init__(self, state_dim, max_future_len=36, nhead=4, num_layers=2, dropout=0.1):
         super().__init__()
-        self.glucose_head = nn.Linear(state_dim, max_future_len)
-        self.score_head = nn.Sequential(
-            nn.Linear(state_dim, state_dim), nn.GELU(), nn.Linear(state_dim, 1)
-        )
+        self.backbone = transformer_encoder(state_dim, nhead, num_layers, dropout)
+        self.position = PositionalEncoding(state_dim)
+        self.score_head = nn.Sequential(nn.Linear(state_dim, state_dim), nn.GELU(), nn.Linear(state_dim, 1))
 
-    def forward(self, fused_state, target_len=None):
-        glucose = self.glucose_head(fused_state)
-        if target_len is not None:
-            if target_len <= glucose.size(-1):
-                glucose = glucose[..., :target_len]
-            else:
-                tail = glucose[..., -1:].expand(*glucose.shape[:-1], target_len - glucose.size(-1))
-                glucose = torch.cat([glucose, tail], dim=-1)
-        score = self.score_head(fused_state).squeeze(-1)
-        if fused_state.dim() == 3:
-            # Keep the public ranking output scalar per candidate while using
-            # every latent transition step.  The per-step values are exposed
-            # by the model's ``return_details`` path for diagnostics.
-            glucose = glucose.mean(dim=1)
-            score = score.mean(dim=1)
-        return glucose, score
+    def forward(self, future_rollout, current_state=None):
+        future = future_rollout.unsqueeze(1) if future_rollout.ndim == 2 else future_rollout
+        if current_state is None:
+            raise ValueError("Ranking requires the current physiological state.")
+        tokens = torch.cat([current_state.unsqueeze(1), future], dim=1)
+        tokens = self.position(tokens.transpose(0, 1)).transpose(0, 1)
+        transformed = self.backbone(tokens, mask=causal_mask(tokens.size(1), tokens.device))[:, 1:]
+        score = self.score_head(transformed.mean(dim=1)).squeeze(-1)
+        return transformed, score
 
 
 class CGMPredictionModelWithImage(nn.Module):
-    """Action-conditioned CGM world model with optional ranking outputs."""
+    """Shared action-conditioned model for all three own-method training phases."""
+    training_only_prefixes = ("diet_annotation_head.", "exercise_annotation_head.", "omics_head.",
+                              "diet_aux_decoder.", "exercise_aux_decoder.")
 
-    def __init__(self,
-                 model_key=None,
-                 text_hidden_dim=256,
-                 cgm_d_model=128,
-                 cgm_nhead=8,
-                 cgm_num_layers=3,
-                 cgm_dim_feedforward=512,
-                 dropout=0.1,
-                 use_mirror=True,
-                 qwen_model_path=None,
-                 use_image_features=True,
-                 vision_model_key="qwen2.5-vl-72b-instruct",
-                 vision_model_path=None,
-                 max_future_len=32):
-        """
-        Initialize CGM prediction model
-
-        Args:
-            model_key: Language model key
-            text_hidden_dim: Text feature dimension
-            cgm_d_model: CGM Transformer model dimension
-            cgm_nhead: Number of attention heads
-            cgm_num_layers: Number of Transformer layers
-            cgm_dim_feedforward: Feed-forward network dimension
-            dropout: Dropout rate
-            use_mirror: Whether to use HF mirror
-            qwen_model_path: Local path for Qwen model
-            use_image_features: Whether to use image features
-        """
-        super(CGMPredictionModelWithImage, self).__init__()
-
-        self.use_image_features = use_image_features
-        self.vision_model_path = vision_model_path
-        self.max_future_len = max_future_len
-
-        self.text_encoder = TextEncoder(
-            model_key=model_key,
-            hidden_dim=text_hidden_dim,
-            use_mirror=use_mirror,
-            qwen_model_path=qwen_model_path
-        )
-
-        if self.use_image_features:
-            force_cnn = (vision_model_key == 'cnn-backup')
-
-            self.image_encoder = ImageEncoder(
-                model_name=vision_model_key,
-                hidden_dim=text_hidden_dim,
-                use_mirror=use_mirror,
-                force_cnn=force_cnn,
-                model_path=vision_model_path
-            )
-
-        self.cgm_encoder = CGMTransformerEncoder(
-            input_dim=1,
-            d_model=cgm_d_model,
-            nhead=cgm_nhead,
-            num_layers=cgm_num_layers,
-            dim_feedforward=cgm_dim_feedforward,
-            dropout=dropout
-        )
-
-        # Keep the physiological state independent from the candidate action.
-        # Food/exercise/image features are supplied only to their respective
-        # action encoders below.  If they were concatenated here, replacing a
-        # candidate action for a what-if simulation would still leave the
-        # observed action in ``physiological_state`` and leak the factual
-        # treatment into the counterfactual branch.
-        fusion_input_dim = text_hidden_dim * 2 + cgm_d_model
-        self.feature_fusion = nn.Sequential(
-            nn.Linear(fusion_input_dim, cgm_d_model),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-
-        # Manuscript-aligned diet/exercise sub-world models and ranking path.
-        diet_action_dim = text_hidden_dim * (2 if self.use_image_features else 1)
-        self.diet_action_projection = nn.Linear(diet_action_dim, cgm_d_model)
+    def __init__(self, model_key=None, text_hidden_dim=256, cgm_d_model=128,
+                 cgm_nhead=4, cgm_num_layers=2, cgm_dim_feedforward=512,
+                 dropout=0.1, use_mirror=False, qwen_model_path=None,
+                 use_image_features=True, vision_model_key=None, vision_model_path=None,
+                 max_future_len=36, patch_size=6, annotation_dim=4096,
+                 include_training_heads=True, text_encoder=None, image_encoder=None,
+                 transition_layers=2, trajectory_layers=2, ranking_layers=2):
+        super().__init__()
+        if not use_image_features:
+            raise ValueError("The diet encoder is joint image/text; text-only records may use image=None.")
+        self.use_image_features, self.max_future_len = True, int(max_future_len)
+        self.include_training_heads = bool(include_training_heads)
+        self.annotation_dim = int(annotation_dim)
+        self.text_encoder = text_encoder if text_encoder is not None else TextEncoder(
+            model_key, text_hidden_dim, qwen_model_path=qwen_model_path)
+        self.image_encoder = image_encoder if image_encoder is not None else ImageEncoder(
+            hidden_dim=text_hidden_dim, model_path=vision_model_path)
+        self.cgm_encoder = CGMTransformerEncoder(1, cgm_d_model, cgm_nhead, cgm_num_layers,
+                                                 cgm_dim_feedforward, dropout, patch_size)
+        self.feature_fusion = nn.Sequential(nn.Linear(text_hidden_dim * 2 + cgm_d_model, cgm_d_model),
+                                            nn.ReLU(), nn.Dropout(dropout))
+        self.diet_action_projection = nn.Linear(text_hidden_dim, cgm_d_model)
         self.exercise_action_projection = nn.Linear(text_hidden_dim, cgm_d_model)
-        # The action projections above are the action encoders.  The latent
-        # transition consumes their projected vectors directly, avoiding a
-        # second unlabelled projection inside the transition module.
-        self.diet_transition = ActionTransitionModule(cgm_d_model, None, dropout)
-        self.exercise_transition = ActionTransitionModule(cgm_d_model, None, dropout)
-        self.future_state_fusion = CrossAttentionFusion(cgm_d_model, nhead=cgm_nhead, dropout=dropout)
-        self.ranking_head = PrescriptionRankingHead(cgm_d_model, max_future_len=max_future_len)
+        transition_args = dict(dropout=dropout, nhead=cgm_nhead,
+                               transition_layers=transition_layers, trajectory_layers=trajectory_layers)
+        self.diet_transition = ActionTransitionModule(cgm_d_model, **transition_args)
+        self.exercise_transition = ActionTransitionModule(cgm_d_model, **transition_args)
+        self.future_state_fusion = CrossAttentionFusion(cgm_d_model, cgm_nhead, dropout)
+        self.ranking_head = PrescriptionRankingHead(cgm_d_model, self.max_future_len, cgm_nhead,
+                                                    ranking_layers, dropout)
+        decoder_args = dict(d_model=cgm_d_model, nhead=cgm_nhead, num_layers=cgm_num_layers,
+                            dim_feedforward=cgm_dim_feedforward, dropout=dropout)
+        # G is this Transformer decoder. Ranking and glucose readouts share
+        # the ranking backbone so CGM regularization actually constrains it.
+        self.cgm_decoder = CGMTransformerDecoder(**decoder_args)
+        if self.include_training_heads:
+            self.diet_aux_decoder = CGMTransformerDecoder(**decoder_args)
+            self.exercise_aux_decoder = CGMTransformerDecoder(**decoder_args)
+            self.diet_annotation_head = nn.Linear(cgm_d_model, self.annotation_dim)
+            self.exercise_annotation_head = nn.Linear(cgm_d_model, self.annotation_dim)
+            self.omics_head = nn.Linear(cgm_d_model, self.annotation_dim)
 
-        self.cgm_decoder = CGMTransformerDecoder(
-            d_model=cgm_d_model,
-            output_dim=1,
-            nhead=cgm_nhead,
-            num_layers=cgm_num_layers,
-            dim_feedforward=cgm_dim_feedforward,
-            dropout=dropout
-        )
+    @property
+    def device(self):
+        return next(self.feature_fusion.parameters()).device
 
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def encode_actions(self, *, food_texts, food_images=None,
+                       exercise_input_ids, exercise_attention_mask, **unused):
+        if food_texts is None:
+            raise ValueError("food_texts is required for joint diet encoding.")
+        if food_images is None:
+            food_images = [None] * len(food_texts)
+        diet = self.diet_action_projection(self.image_encoder(food_images, food_texts))
+        exercise = self.exercise_action_projection(self.text_encoder.encode(
+            exercise_input_ids, exercise_attention_mask, "exercise"))
+        return diet, exercise
 
-    def to(self, device):
-        """Override to method to ensure all submodules move to correct device"""
-        super(CGMPredictionModelWithImage, self).to(device)
-        self.device = device
-        return self
-
-    def forward(self, metadata_input_ids, metadata_attention_mask,
-                sleep_input_ids, sleep_attention_mask,
-                food_input_ids, food_attention_mask,
-                exercise_input_ids=None, exercise_attention_mask=None,
-                cgm_preprandial=None, cgm_postprandial=None,
-                food_images=None, cgm_preprandial_mask=None,
-                diet_action_override=None, exercise_action_override=None,
-                rollout_horizon=None, return_details=False):
-        """
-        Forward pass
-
-        Args:
-            metadata_input_ids: Metadata input token IDs [batch_size, seq_len]
-            metadata_attention_mask: Metadata attention mask [batch_size, seq_len]
-            sleep_input_ids: Sleep data input token IDs [batch_size, seq_len]
-            sleep_attention_mask: Sleep data attention mask [batch_size, seq_len]
-            food_input_ids: Food data input token IDs [batch_size, seq_len]
-            food_attention_mask: Food data attention mask [batch_size, seq_len]
-            exercise_input_ids: Exercise data input token IDs [batch_size, seq_len]
-            exercise_attention_mask: Exercise data attention mask [batch_size, seq_len]
-            cgm_preprandial: Preprandial CGM sequence [batch_size, seq_len]
-            cgm_preprandial_mask: 1 for measured preprandial points and 0 for
-                padding [batch_size, seq_len]
-            cgm_postprandial: Postprandial CGM sequence (used during training) [batch_size, target_len]
-            food_images: Food image list [batch_size]
-            diet_action_override: Optional diet action embedding.  It can be a
-                raw diet embedding with dimension ``text_hidden_dim`` (or
-                ``2 * text_hidden_dim`` when images are enabled), or a
-                projected ``cgm_d_model`` embedding.  Supplying this replaces
-                the observed meal action for what-if simulation.
-            exercise_action_override: Optional projected/raw exercise action
-                embedding, with the same replacement semantics.
-            rollout_horizon: Number of learned transition steps.  If omitted,
-                training uses the observed post-CGM length and inference uses
-                the configured horizon. A scalar action is reused at each
-                step; a ``[batch, horizon, dim]`` override supplies a
-                different action at each step.
-
-        Returns:
-            predicted_cgm: Predicted postprandial CGM sequence [batch_size, target_len, 1]
-        """
-        encoded_metadata, encoded_sleep, encoded_food, encoded_exercise = self.text_encoder(
-            metadata_input_ids, metadata_attention_mask,
-            sleep_input_ids, sleep_attention_mask,
-            food_input_ids, food_attention_mask,
-            exercise_input_ids, exercise_attention_mask
-        )
-
-        if self.use_image_features and food_images is not None:
-            encoded_images = self.image_encoder(food_images)
-        else:
-            batch_size = metadata_input_ids.size(0)
-            encoded_images = torch.zeros(batch_size, encoded_metadata.size(1)).to(self.device)
-
-        encoded_cgm = self.cgm_encoder(cgm_preprandial, attention_mask=cgm_preprandial_mask)
-
-        if cgm_preprandial_mask is None:
-            pooled_cgm = torch.mean(encoded_cgm, dim=1)
-        else:
-            cgm_weights = cgm_preprandial_mask.to(
-                device=encoded_cgm.device, dtype=encoded_cgm.dtype
-            ).unsqueeze(-1)
-            pooled_cgm = (encoded_cgm * cgm_weights).sum(dim=1) / cgm_weights.sum(dim=1).clamp_min(1.0)
-
-        # Baseline state available immediately before the decision point.  The
-        # candidate diet/exercise representations are intentionally absent so
-        # that a simulated alternative action starts from the same state.
-        fused_features = torch.cat([
-            encoded_metadata, encoded_sleep, pooled_cgm
-        ], dim=1)
-
-        fused_features = self.feature_fusion(fused_features)
-
-        if cgm_postprandial is not None:
-            target_len = cgm_postprandial.size(1)
-        else:
-            target_len = min(self.max_future_len, encoded_cgm.size(1))
-        if rollout_horizon is None:
-            rollout_horizon = target_len
-        rollout_horizon = int(rollout_horizon)
-
-        # Generate separate diet and exercise future states before the
-        # cross-attention fusion and ranking heads described in the manuscript.
-        if diet_action_override is None:
-            if self.use_image_features:
-                diet_action = self.diet_action_projection(torch.cat([encoded_food, encoded_images], dim=-1))
-            else:
-                diet_action = self.diet_action_projection(encoded_food)
-        else:
-            diet_action = self._coerce_action_override(
-                diet_action_override,
-                self.diet_action_projection,
-                self.diet_action_projection.in_features,
-                "diet_action_override",
-            )
-        if exercise_action_override is None:
-            exercise_action = self.exercise_action_projection(encoded_exercise)
-        else:
-            exercise_action = self._coerce_action_override(
-                exercise_action_override,
-                self.exercise_action_projection,
-                self.exercise_action_projection.in_features,
-                "exercise_action_override",
-            )
-
-        diet_dynamic_steps, diet_trajectory_steps = self.diet_transition.rollout(
-            fused_features, diet_action, horizon=rollout_horizon
-        )
-        exercise_dynamic_steps, exercise_trajectory_steps = self.exercise_transition.rollout(
-            fused_features, exercise_action, horizon=rollout_horizon
-        )
-        diet_dynamic, diet_trajectory = diet_dynamic_steps[:, -1], diet_trajectory_steps[:, -1]
-        exercise_dynamic, exercise_trajectory = (
-            exercise_dynamic_steps[:, -1], exercise_trajectory_steps[:, -1]
-        )
-        # Keep every transition step as decoder memory.  The final state is
-        # retained separately for scalar ranking outputs and backwards
-        # compatible diagnostics.
-        future_rollout = self.future_state_fusion(
-            diet_trajectory_steps, exercise_trajectory_steps
-        )
-        future_state = future_rollout[:, -1]
-
-        if cgm_postprandial is not None:
-            target_sequence = cgm_postprandial.unsqueeze(-1)
-            predicted_cgm = self.cgm_decoder(encoded_cgm, future_rollout, target_sequence)
-        else:
-            predicted_cgm = self.cgm_decoder(
-                encoded_cgm, future_rollout, target_len=rollout_horizon
-            )
-            target_len = predicted_cgm.size(1)
-
-        ranking_glucose, ranking_score = self.ranking_head(future_state, target_len=target_len)
-        if return_details:
-            return {
-                'predicted_cgm': predicted_cgm.squeeze(-1),
-                'ranking_score': ranking_score,
-                'ranking_glucose': ranking_glucose,
-                'diet_dynamic_state': diet_dynamic,
-                'diet_trajectory_state': diet_trajectory,
-                'exercise_dynamic_state': exercise_dynamic,
-                'exercise_trajectory_state': exercise_trajectory,
-                'diet_dynamic_rollout': diet_dynamic_steps,
-                'diet_trajectory_rollout': diet_trajectory_steps,
-                'exercise_dynamic_rollout': exercise_dynamic_steps,
-                'exercise_trajectory_rollout': exercise_trajectory_steps,
-                'fused_future_state': future_state,
-                'fused_future_rollout': future_rollout,
-            }
-
-        return predicted_cgm.squeeze(-1)  # [batch_size, target_len]
+    def pretrain_annotations(self, **batch):
+        if not self.include_training_heads:
+            raise ValueError("Annotation supervision requires training heads.")
+        diet, exercise = self.encode_actions(**batch)
+        return {"diet": self.diet_annotation_head(diet),
+                "exercise": self.exercise_annotation_head(exercise)}
 
     def _coerce_action_override(self, override, projection, raw_dim, name):
-        """Validate and project a counterfactual action embedding.
-
-        A candidate generator can pass either the encoder-space representation
-        (``raw_dim``) or a representation already projected to the transition
-        state size (``cgm_d_model``).  The latter is useful when a caller
-        caches encoded candidates.  A clear shape error is preferable to
-        silently treating malformed candidates as observed actions.
-        """
-        if not isinstance(override, torch.Tensor):
-            raise TypeError(f"{name} must be a torch.Tensor")
-        if override.dim() not in (2, 3):
-            raise ValueError(f"{name} must have shape [batch, dim] or [batch, steps, dim]")
-        reference = next(projection.parameters(), None)
-        if reference is None:
-            reference = next(self.parameters())
-        override = override.to(device=reference.device, dtype=reference.dtype)
-        last_dim = override.size(-1)
-        if last_dim == raw_dim:
-            flat = override.reshape(-1, last_dim)
-            projected = projection(flat).reshape(*override.shape[:-1], -1)
-            return projected
-        if last_dim == self.cgm_encoder.d_model:
+        if not isinstance(override, torch.Tensor) or override.ndim not in (2, 3):
+            raise ValueError(f"{name} must be a [batch,action] or [batch,horizon,action] tensor.")
+        parameter = next(projection.parameters())
+        override = override.to(device=parameter.device, dtype=parameter.dtype)
+        if override.size(-1) == self.cgm_encoder.d_model:
             return override
-        raise ValueError(
-            f"{name} last dimension {last_dim} does not match raw action dimension "
-            f"{raw_dim} or transition dimension {self.cgm_encoder.d_model}"
-        )
+        if override.size(-1) == raw_dim:
+            return projection(override)
+        raise ValueError(f"Invalid {name} dimension {override.size(-1)}.")
 
-    def simulate_actions(self, *, diet_action=None, exercise_action=None,
-                         rollout_horizon=None, **context):
-        """Simulate alternative diet/exercise actions from one observed state.
+    def forward(self, metadata_input_ids, metadata_attention_mask, sleep_input_ids, sleep_attention_mask,
+                food_input_ids=None, food_attention_mask=None, exercise_input_ids=None,
+                exercise_attention_mask=None, cgm_preprandial=None, cgm_postprandial=None,
+                food_images=None, cgm_preprandial_mask=None, food_texts=None,
+                diet_action_override=None, exercise_action_override=None,
+                rollout_horizon=None, return_details=False, compute_auxiliary=False,
+                decode_glucose=True):
+        if not decode_glucose and (not return_details or compute_auxiliary):
+            raise ValueError("Score-only calls require return_details=True and no auxiliary decoding.")
+        metadata = self.text_encoder.encode(metadata_input_ids, metadata_attention_mask, "metadata")
+        sleep = self.text_encoder.encode(sleep_input_ids, sleep_attention_mask, "sleep")
+        encoded_cgm = self.cgm_encoder(cgm_preprandial, cgm_preprandial_mask)
+        weights = self.cgm_encoder.patch_weights(cgm_preprandial, cgm_preprandial_mask)
+        weights = weights.to(device=encoded_cgm.device, dtype=encoded_cgm.dtype).unsqueeze(-1)
+        pooled = (encoded_cgm * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+        physiological_state = self.feature_fusion(torch.cat([metadata, sleep, pooled], dim=-1))
+        if diet_action_override is None:
+            if food_texts is None:
+                raise ValueError("Supply dietary descriptions as food_texts, or a cached diet_action_override.")
+            images = food_images if food_images is not None else [None] * len(food_texts)
+            diet_action = self.diet_action_projection(self.image_encoder(images, food_texts))
+        else:
+            diet_action = self._coerce_action_override(diet_action_override, self.diet_action_projection,
+                                                       self.diet_action_projection.in_features, "diet_action")
+        if exercise_action_override is None:
+            if exercise_input_ids is None:
+                exercise_action = physiological_state.new_zeros(physiological_state.shape)
+            else:
+                exercise_action = self.exercise_action_projection(self.text_encoder.encode(
+                    exercise_input_ids, exercise_attention_mask, "exercise"))
+        else:
+            exercise_action = self._coerce_action_override(exercise_action_override, self.exercise_action_projection,
+                                                           self.exercise_action_projection.in_features, "exercise_action")
+        target_len = cgm_postprandial.size(1) if cgm_postprandial is not None else self.max_future_len
+        horizon = target_len if rollout_horizon is None else int(rollout_horizon)
+        if cgm_postprandial is not None and horizon != target_len:
+            raise ValueError("Training rollout_horizon must match the supervised CGM horizon.")
+        diet_dynamics, diet_trajectory = self.diet_transition.rollout(physiological_state, diet_action, horizon)
+        exercise_dynamics, exercise_trajectory = self.exercise_transition.rollout(physiological_state, exercise_action, horizon)
+        fused = self.future_state_fusion(diet_trajectory, exercise_trajectory)
+        ranked_rollout, score = self.ranking_head(fused, physiological_state)
+        target = cgm_postprandial.unsqueeze(-1) if cgm_postprandial is not None else None
+        predicted = (self.cgm_decoder(encoded_cgm, ranked_rollout, target, horizon).squeeze(-1)
+                     if decode_glucose else None)
+        if not return_details:
+            return predicted
+        details = {"predicted_cgm": predicted, "ranking_glucose": predicted, "ranking_score": score,
+                   "physiological_state": physiological_state, "fused_future_state": fused[:, -1],
+                   "fused_future_rollout": fused, "ranking_rollout": ranked_rollout,
+                   "diet_dynamic_state": diet_dynamics[:, -1], "diet_trajectory_state": diet_trajectory[:, -1],
+                   "exercise_dynamic_state": exercise_dynamics[:, -1], "exercise_trajectory_state": exercise_trajectory[:, -1],
+                   "diet_dynamic_rollout": diet_dynamics, "diet_trajectory_rollout": diet_trajectory,
+                   "exercise_dynamic_rollout": exercise_dynamics, "exercise_trajectory_rollout": exercise_trajectory}
+        if compute_auxiliary:
+            if not self.include_training_heads or target is None:
+                raise ValueError("Auxiliary training requires training heads and observed CGM targets.")
+            details.update(
+                diet_auxiliary_cgm=self.diet_aux_decoder(encoded_cgm, diet_trajectory, target, horizon).squeeze(-1),
+                exercise_auxiliary_cgm=self.exercise_aux_decoder(encoded_cgm, exercise_trajectory, target, horizon).squeeze(-1),
+                omics_prediction=self.omics_head(fused.mean(dim=1)))
+        return details
 
-        ``context`` accepts the same physiological/text/image arguments as
-        :meth:`forward`.  The returned dictionary contains the predicted CGM
-        trajectory, ranking score and every latent transition step.  This
-        explicit API is what connects candidate generation to auditable
-        what-if comparison; it does not imply that observational data alone
-        identifies causal effects.
-        """
-        context.pop("cgm_postprandial", None)
-        context.pop("diet_action_override", None)
-        context.pop("exercise_action_override", None)
-        context.pop("return_details", None)
-        context["diet_action_override"] = diet_action
-        context["exercise_action_override"] = exercise_action
-        context["rollout_horizon"] = rollout_horizon
-        context["return_details"] = True
-        return self.forward(**context)
+    def inference_state_dict(self):
+        return {key: value for key, value in self.state_dict().items()
+                if not key.startswith(self.training_only_prefixes)}
+
+    def simulate_actions(self, *, diet_action=None, exercise_action=None, rollout_horizon=None, **context):
+        for key in ("cgm_postprandial", "diet_action_override", "exercise_action_override", "return_details", "compute_auxiliary", "decode_glucose"):
+            context.pop(key, None)
+        return self.forward(**context, diet_action_override=diet_action, exercise_action_override=exercise_action,
+                            rollout_horizon=rollout_horizon, return_details=True)
 
     @torch.no_grad()
     def simulate_counterfactuals(self, context, action_variants, rollout_horizon=None):
-        """Compare several candidate actions from one fixed physiological state.
-
-        ``context`` contains the observed metadata, sleep and pre-event CGM
-        tensors.  Each item in ``action_variants`` may contain ``diet_action``
-        and/or ``exercise_action`` tensors (raw encoder-space or projected
-        transition-space).  An omitted action is held at its observed value,
-        so a diet-only comparison keeps exercise fixed.  Outputs are stacked
-        as ``[batch, candidate, ...]`` for direct ranking and delta analysis.
-        This is learned predictive simulation; causal identification still
-        requires interventionally informative data and assumptions.
-        """
         if not action_variants:
-            raise ValueError("action_variants must contain at least one candidate")
+            raise ValueError("Supply at least one candidate action.")
         was_training = self.training
         self.eval()
-        outputs = []
         try:
+            outputs = []
             for variant in action_variants:
-                if not isinstance(variant, dict):
-                    raise TypeError("each action variant must be a dictionary")
                 variant = dict(variant)
-                diet_action = variant.pop("diet_action", variant.pop("diet_action_override", None))
-                exercise_action = variant.pop(
-                    "exercise_action", variant.pop("exercise_action_override", None)
-                )
-                merged_context = dict(context)
-                merged_context.update(variant)
-                outputs.append(
-                    self.simulate_actions(
-                        diet_action=diet_action,
-                        exercise_action=exercise_action,
-                        rollout_horizon=rollout_horizon,
-                        **merged_context,
-                    )
-                )
+                diet = variant.pop("diet_action", variant.pop("diet_action_override", None))
+                exercise = variant.pop("exercise_action", variant.pop("exercise_action_override", None))
+                merged = dict(context); merged.update(variant)
+                outputs.append(self.simulate_actions(diet_action=diet, exercise_action=exercise,
+                                                     rollout_horizon=rollout_horizon, **merged))
+            keys = ("predicted_cgm", "ranking_glucose", "ranking_score", "diet_dynamic_rollout",
+                    "diet_trajectory_rollout", "exercise_dynamic_rollout", "exercise_trajectory_rollout",
+                    "fused_future_rollout")
+            result = {key: torch.stack([output[key] for output in outputs], dim=1) for key in keys}
+            for key in ("predicted_cgm", "ranking_score"):
+                result[key + "_delta"] = result[key] - result[key][:, :1]
+            return result
         finally:
             self.train(was_training)
-
-        stack_keys = (
-            "predicted_cgm", "ranking_glucose", "ranking_score",
-            "diet_dynamic_rollout", "diet_trajectory_rollout",
-            "exercise_dynamic_rollout", "exercise_trajectory_rollout",
-            "fused_future_rollout",
-        )
-        result = {
-            key: torch.stack([output[key] for output in outputs], dim=1)
-            for key in stack_keys
-            if key in outputs[0]
-        }
-        # The first candidate is the comparison baseline by convention.  The
-        # deltas make the what-if effect auditable without implying causality.
-        if "predicted_cgm" in result:
-            result["predicted_cgm_delta"] = result["predicted_cgm"] - result["predicted_cgm"][:, :1]
-        if "ranking_score" in result:
-            result["ranking_score_delta"] = result["ranking_score"] - result["ranking_score"][:, :1]
-        return result

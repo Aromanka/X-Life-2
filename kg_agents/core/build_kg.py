@@ -28,7 +28,7 @@ config = get_config()
 API_MODEL = config.get("api_model", {})
 DEEPSEEK_API_KEY = API_MODEL.get("api_key", "")
 DEEPSEEK_BASE_URL = API_MODEL.get("base_url", "")
-MODEL_NAME = API_MODEL.get("model", "deepseek-chat")
+MODEL_NAME = API_MODEL.get("model", "DeepSeek-R1")
 # Always use API model (no local model fallback)
 USE_LOCAL = False
 print(f"[INFO] KG Builder LLM mode: api")

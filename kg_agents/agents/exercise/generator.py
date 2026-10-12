@@ -13,7 +13,7 @@ from core.llm.utils import parse_json_response
 from core.neo4j import get_kg_query
 import random
 from agents.exercise.config import *
-from kg.prompts import (
+from core.prompts import (
     GET_EXERCISE_GENERATION_SYSTEM_PROMPT,
     build_exercise_prompt
 )
