@@ -14,8 +14,7 @@ from core.neo4j import get_kg_query
 import random
 from agents.exercise.config import *
 from core.prompts import (
-    GET_EXERCISE_GENERATION_SYSTEM_PROMPT,
-    build_exercise_prompt
+    GET_EXERCISE_GENERATION_SYSTEM_PROMPT
 )
 
 
@@ -249,14 +248,13 @@ class ExerciseAgent(BaseAgent, ExerciseAgentMixin):
         season = env.get("time_context", {}).get("season", "any")
 
         # Build base user prompt
-        # base_prompt = self._build_exercise_prompt(
-        base_prompt = build_exercise_prompt(
+        base_prompt = self._build_exercise_prompt(
             user_meta=user_meta,
             environment=env,
             requirement=requirement,
             kg_context=kg_context,
             target_calories=target_calories,
-            target_duration=duration,
+            target_duration=target_duration,
             target_intensity=preferred_intensity,
             target_frequency=target_frequency,
             user_preference=user_preference

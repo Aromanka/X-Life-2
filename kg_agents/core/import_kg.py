@@ -99,6 +99,7 @@ def import_json_triplets(session, json_path):
         relation = t.get('relation', '').strip()
         tail = t.get('tail', '').strip()
         source = t.get('source', '')
+        context = t.get('context') or ''
 
         if not head or not relation or not tail:
             continue
@@ -112,10 +113,12 @@ def import_json_triplets(session, json_path):
 
             # create entity & relation
             session.run(f"""
-                MERGE (h:{head_label} {{name: $head}})
-                MERGE (t:{tail_label} {{name: $tail}})
-                MERGE (h)-[r:`{rel_type}` {{source: $source}}]->(t)
-            """, head=head, tail=tail, relation=relation, source=source)
+                MERGE (h:Entity {{name: $head}})
+                SET h:{head_label}
+                MERGE (t:Entity {{name: $tail}})
+                SET t:{tail_label}
+                MERGE (h)-[r:`{rel_type}` {{source: $source, context: $context}}]->(t)
+            """, head=head, tail=tail, relation=relation, source=source, context=context)
             count += 1
         except Exception as e:
             print(f"  Failed to import: {head} -[{relation}]-> {tail}: {e}")
@@ -140,6 +143,8 @@ def import_csv_triplets(session, csv_path):
         relation = str(row.get('relation', '')).strip()
         tail = str(row.get('tail', '')).strip()
         source = str(row.get('source', '')).strip()
+        context = row.get('context', '')
+        context = '' if pd.isna(context) else str(context)
 
         if not head or not relation or not tail or head == 'nan':
             continue
@@ -152,10 +157,12 @@ def import_csv_triplets(session, csv_path):
             tail_label = infer_entity_label(tail, "tail", relation)
 
             session.run(f"""
-                MERGE (h:{head_label} {{name: $head}})
-                MERGE (t:{tail_label} {{name: $tail}})
-                MERGE (h)-[r:`{rel_type}` {{source: $source}}]->(t)
-            """, head=head, tail=tail, relation=relation, source=source)
+                MERGE (h:Entity {{name: $head}})
+                SET h:{head_label}
+                MERGE (t:Entity {{name: $tail}})
+                SET t:{tail_label}
+                MERGE (h)-[r:`{rel_type}` {{source: $source, context: $context}}]->(t)
+            """, head=head, tail=tail, relation=relation, source=source, context=context)
             count += 1
         except Exception as e:
             print(f"  Failed to import: {head} -[{relation}]-> {tail}: {e}")
