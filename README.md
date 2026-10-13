@@ -75,7 +75,7 @@ This repository contains the Python code and sample dataset for the paper **"A m
 
 #### 1. Clone the Repository
 ```bash
-git clone https://github.com/LittleQBerry/X-Life.git
+git clone https://github.com/2025XLife/X-Life.git
 cd X-Life
 ```
 
