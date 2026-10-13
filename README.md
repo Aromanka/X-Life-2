@@ -233,8 +233,7 @@ Copy the configuration template and set the local Qwen3-8B and Qwen2.5-VL-72B-In
 cp configs/local.example.json configs/local.json
 ```
 
-> **Note on the diet action encoder.** In the manuscript, the Qwen2.5-VL-72B-Instruct backbone used for diet-action representation is further supervised fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The resulting diet-information-tuned model (together with its projection head) is the intended diet action encoder. The repository does not distribute those fine-tuned weights; set the local model path to the corresponding checkpoint. A vanilla base Qwen2.5-VL-72B-Instruct checkpoint is not equivalent to the manuscript model.
-
+> **Note** The Qwen2.5-VL-72B-Instruct backbone used for diet-action representation is supervised fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The resulting diet-information-tuned model (together with its projection head) is the intended diet action encoder.
 **3. Training**
 
 Run the following commands from the repository root with your training data:
