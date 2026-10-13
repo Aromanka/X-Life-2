@@ -1,10 +1,10 @@
-# X-Life minimal test dataset
+# X-Life minimal dataset
 
-It contains 3 pseudonymous participants and 6 observed event windows: 2 meals, 2 exercise records, and 2 nights. 
+It contains 3 pseudonymous participants and 6 observed event windows: 2 meals, 2 exercise records, and 2 nights.
 
 ## Contents
 
-- `sample_data.json`: patient objects compatible with the existing top-level `subject_id`, `metadata`, `meals`, and `nocturnal_hypoglycemia` layout. `exercise_events` and explicit labels/trajectories extend that layout.
+- `sample_data.json`: participant metadata, meals, exercise events, nocturnal CGM windows, labels and observed trajectories.
 - `images/`: four actual meal photographs. Filenames are pseudonymous. JPEG metadata segments were removed while decoded pixels were verified identical to the source files.
 - `manifest.json`: expected event counts and SHA-256 hashes for the four images.
 
@@ -26,10 +26,10 @@ Source application timestamps were stored as UTC without a timezone; CGM device 
 
 Night labels were recalculated using the project's rule: within 22:00–08:00, at least three consecutive readings on the same device below 3.9 mmol/L. They are **rule-derived CGM labels**, not clinician-adjudicated hypoglycemia events. No actual sleep onset/offset was verified; `cgm_sleep` denotes the night clock window. `metadata["Hypoglycemia (yes/no)"]` remains null because it represents clinical history, not the rule-derived night label.
 
-## Compatibility
+## Data loading
 
-The repository's `SampleImageDataset` reads the two `meals` entries and can resolve `food_items[].img_names` when `image_dir` points to `images/`. It also converts top-level `exercise_events` with both CGM windows into standalone exercise samples; night labels remain metadata for downstream rule evaluation. The `P001` meal also populates the legacy `exercise_data_after_meal` field, and `cgm_pre_exercise` / `cgm_post_exercise` supply its observed exercise trajectory.
+The repository's `SampleImageDataset` reads the two `meals` entries and resolves `food_items[].img_names` when `image_dir` points to `images/`. It also converts top-level `exercise_events` with both CGM windows into standalone exercise samples; night labels remain metadata for downstream rule evaluation. The `P001` meal includes the `exercise_data_after_meal` field, and `cgm_pre_exercise` / `cgm_post_exercise` supply its observed exercise trajectory.
 
-## Review before publication
+## Metadata
 
-This package is included in the repository as a code-verification fixture. Before using it in a journal supplement or other public release, confirm the cohort's permission to release individual photos and trajectories. The `P003` app-to-CGM identity link is based on unique name plus matching age because the app account lacks a phone number; confirm it before any broader release. Clinical duration, complications, specific medication names, and prior hypoglycemia history are unavailable and were left null rather than inferred.
+The `P003` application-to-CGM linkage uses a unique name and matching age; a phone identifier was unavailable. Clinical duration, complications, specific medication names and prior hypoglycemia history are unavailable and stored as null.

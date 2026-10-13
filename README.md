@@ -30,7 +30,7 @@
 - [🏗️ Core Modules](#️-core-modules)
   - [1. 🕸️ Lifestyle Prescription Generation Module](#1-️-lifestyle-prescription-generation-module)
     - [Configuration Steps](#configuration-steps)
-    - [Test Pipelines](#test-pipelines)
+    - [Run Pipelines](#run-pipelines)
   - [2. 🧠 Diet/Exercise Sub-world model and Ranking Module](#2--dietexercise-sub-world-model-and-ranking-module)
   - [3. 🛡️ Safety Module](#3-️-safety-module)
   - [4. 🧬 Multi-omics Model](#4--multi-omics-model)
@@ -47,13 +47,12 @@
     - [Build APK](#build-apk)
       - [Pre-build Checklist](#pre-build-checklist)
       - [Build Steps in Unity (Android)](#build-steps-in-unity-android)
-    - [Troubleshooting](#troubleshooting)
 - [📊 Minimal Dataset](#-minimal-dataset)
 - [📄 License](#-license)
 
 ## 🌟 Overview
 
-This repository contains the Python code and sample dataset for the paper **"A metabolic world model system for personalised lifestyle medicine"**. The Unity AR client is distributed separately as the external `XLIFE-AR.zip` archive described below.
+This repository contains the Python code and minimal dataset for the paper **"A metabolic world model system for personalised lifestyle medicine"**. The Unity AR client is distributed separately as the external `XLIFE-AR.zip` archive described below.
 
 
 ## 🚀 Quick Start
@@ -172,15 +171,15 @@ python -m core.import_kg
 python -m core.embed_kg
 ```
 
-#### Test Pipelines
+#### Run Pipelines
 
 **Generation and Assessment Pipelines**
 ```bash
 # Run these commands from the repository root.
 cd kg_agents
-# Test diet prescription pipeline
+# Run diet prescription pipeline
 python -m pipeline.diet_pipeline --bn 1 --vn 5 --query "I want a sandwich with just veggies, no meat." --use_vector --rag_topk 5
-# Test exercise prescription pipeline
+# Run exercise prescription pipeline
 python -m pipeline.exer_pipeline --bn 1 --vn 4 --query "I want to do some back exercises at the gym." --use_vector --rag_topk 5
 ```
 
@@ -193,7 +192,7 @@ cd kg_agents
 python server.py
 ```
 
-**API Interface Testing**
+**API Requests**
 ```bash
 # Diet prescription generation
 curl -X POST http://localhost:5000/api/v1/diet/generate-only \
@@ -233,7 +232,7 @@ Copy the configuration template and set the local Qwen3-8B and Qwen2.5-VL-72B-In
 cp configs/local.example.json configs/local.json
 ```
 
-> **Note** The Qwen2.5-VL-72B-Instruct backbone used for diet-action representation is supervised fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The resulting diet-information-tuned model (together with its projection head) is the intended diet action encoder.
+> **Note** The Qwen2.5-VL-72B-Instruct backbone used for diet-action representation is supervised fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The resulting diet-information-tuned model (together with its projection head) serves as the diet action encoder.
 **3. Training**
 
 Run the following commands from the repository root with your training data:
@@ -372,14 +371,6 @@ Alternatively, you can create a ScriptableObject config in Unity Editor:
    - Or click `Build` to export an `.apk` and install it manually
 
 > Note: this project includes a custom manifest at `Assets/Plugins/Android/AndroidManifest.xml`, which declares network/microphone/screen-capture related permissions, including the Android 14+ foreground service permission `FOREGROUND_SERVICE_MEDIA_PROJECTION`.
-
-#### Troubleshooting
-
-- `The type or namespace name 'Vuplex' could not be found`: Vuplex 3D WebView is not imported
-- WebView is blank / cannot load: check `InitialUrl`, device network, and whether cleartext HTTP is allowed (if using `http`)
-- Camera / screen recording does not work in Editor: XREAL capture APIs typically only work on real Android devices (there is also a mock branch in scripts)
-- Screen recording issues on Android 14+: make sure you did not overwrite/remove the foreground service permission declarations in `Assets/Plugins/Android/AndroidManifest.xml`
-
 
 ## 📊 Minimal Dataset
 

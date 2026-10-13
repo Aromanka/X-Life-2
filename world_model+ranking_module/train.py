@@ -88,9 +88,9 @@ def main(argv=None):
     if args.init_checkpoint:
         initial = torch.load(args.init_checkpoint, map_location='cpu', weights_only=False)
         if initial.get('architecture_version') != 2:
-            raise ValueError("Checkpoint architecture differs; use checkpoints from this implementation.")
+            raise ValueError("Incompatible checkpoint architecture.")
         if initial.get('test_backend', False):
-            raise ValueError("Tiny test checkpoints must not be used with research encoders.")
+            raise ValueError("Unsupported checkpoint backend.")
         model.load_state_dict(initial['model_state_dict'], strict=True)
         if args.phase == 'world_model' and initial.get('phase') != 'encoder_pretraining':
             raise ValueError("World-model training must initialize from encoder pretraining.")

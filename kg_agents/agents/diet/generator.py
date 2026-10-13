@@ -24,9 +24,6 @@ def _to_food_item(item_dict: Dict[str, Any]) -> FoodItem:
         food=item_dict.get("food_name", ""),
         portion=f"{item_dict.get('portion_number', '')}{item_dict.get('portion_unit', '')}",
         calories=int(round(item_dict.get("total_calories", 0))),
-        # protein=0.0,  # Placeholder - not tracked in new format
-        # carbs=0.0,    # Placeholder
-        # fat=0.0        # Placeholder
     )
 
 

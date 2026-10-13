@@ -90,7 +90,6 @@ MODEL_CONFIGS = {
         'cgm_dim_feedforward': 512,
         'dropout': 0.1
     },
-    # Backwards-compatible alias used by the small CNN-only demonstration.
     'qwen3-embedding-0.6b': {
         'text_hidden_dim': 256,
         'cgm_d_model': 128,
