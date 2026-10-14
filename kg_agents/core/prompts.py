@@ -1,6 +1,5 @@
 """
 Diet Knowledge Graph Schema & Prompt Configuration
-Revised to include Demographic Targeting, Composition, and Strict JSON Formatting.
 """
 import random
 import re
