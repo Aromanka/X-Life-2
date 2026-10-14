@@ -29,11 +29,11 @@ class LLMClient:
     def _get_log_path(self) -> str:
         try:
             config = get_config()
-            log_path = config.get("llm_log_path", "tests/llm.log")
+            log_path = config.get("llm_log_path", "logs/llm.log")
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             return log_path
         except Exception:
-            return "tests/llm.log"
+            return "logs/llm.log"
 
     def _log(self, messages: List[Dict[str, str]], response: Any, duration_ms: float = 0):
         try:

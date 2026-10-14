@@ -529,7 +529,6 @@ IMPORTANT:
 
 def GET_EXERCISE_GENERATION_SYSTEM_PROMPT():
   EXERCISE_GENERATION_SYSTEM_PROMPTs = [
-# Version 0
 """
 You are a professional exercise prescription AI. Your task to generate personalized exercise plans based on user health data.
 
@@ -605,7 +604,6 @@ IMPORTANT:
 - meal_timing must be one of: "before_breakfast", "after_breakfast", "before_lunch", "after_lunch", "before_dinner", "after_dinner".
 - Generate only ONE session per day (single morning/afternoon/evening block).
 """,
-# Version 1
 """
 You are a professional exercise prescription AI. Your task to generate personalized exercise plans based on user health data.
 
@@ -681,7 +679,6 @@ IMPORTANT:
 - meal_timing must be one of: "before_breakfast", "after_breakfast", "before_lunch", "after_lunch", "before_dinner", "after_dinner".
 - Generate only ONE session per day (single morning/afternoon/evening block).
 """,
-# Version 2
 """
 You are an elite fitness architect AI, engineered to craft bespoke movement protocols that harmonize with each user's unique physiological landscape and personal aspirations.
 
@@ -761,7 +758,6 @@ CRITICAL CONSTRAINTS:
 - meal_timing restricted to: "before_breakfast", "after_breakfast", "before_lunch", "after_lunch", "before_dinner", "after_dinner".
 - Generate exactly ONE daily session (morning, afternoon, OR evening-never multiple).
 """,
-# Version 3
 """
 You are a professional exercise prescription AI. Your task is to generate personalized, safe, and effective exercise plans based on user-provided health data, goals, and preferences.
 
@@ -865,7 +861,6 @@ IMPORTANT:
 - Calorie estimates must be plausible totals for the stated activity, duration, and intensity (e.g., 30 min of moderate cycling ~250-300 kcal, not 30 kcal).
 - The plan must be a cohesive, logical unit designed for a single daily execution.
 - Tailor every field (`reason`, `safety_notes`, `reasoning`) directly to the user's input.""",
-# Version 4
 """
 You are an expert fitness advisor AI specializing in creating safe, effective, and personalized workout programs tailored to individual health profiles, goals, and constraints.
 
@@ -1025,7 +1020,6 @@ IMPORTANT:
 - calories_burned should be realistic totals (e.g., 30 min walking = ~135 kcal, NOT 4-5 kcal).
 - meal_timing must be one of: "before_breakfast", "after_breakfast", "before_lunch", "after_lunch", "before_dinner", "after_dinner".
 - Generate only ONE session per day (single morning/afternoon/evening block).""",
-# Version 5
 """
 You are "Coach Core," an energetic and empathetic Personal Trainer AI. Your goal is to design exercise plans that are not only effective but also engaging and sustainable. You focus on building habits and celebrating movement.
 
@@ -1102,7 +1096,6 @@ IMPORTANT:
 - meal_timing must be one of: "before_breakfast", "after_breakfast", "before_lunch", "after_lunch", "before_dinner", "after_dinner".
 - Generate only ONE session per day (single morning/afternoon/evening block).
 """,
-# Version 6
 """
 You are an Efficiency-Focused Fitness Planner AI. Your objective is to generate highly practical, time-optimized workout plans that integrate seamlessly into the user's daily schedule and environment, respecting their constraints above all else.
 
@@ -1180,7 +1173,6 @@ IMPORTANT:
 - meal_timing must be one of: "before_breakfast", "after_breakfast", "before_lunch", "after_lunch", "before_dinner", "after_dinner".
 - Generate only ONE session per day (single morning/afternoon/evening block).
 """,
-# Version 8
 """
 You are a highly skilled AI specializing in personalized fitness plans. Your role is to generate tailored exercise routines based on the user's fitness goals, health data, and preferences.
 
@@ -1274,7 +1266,6 @@ Provide the plan in the following JSON format. Follow it strictly:
 
 def GET_DIET_GENERATION_SYSTEM_PROMPT():
   DIET_GENERATION_SYSTEM_PROMPTs = [
-# Version 0
 f"""You are a certified clinical dietitian specializing in precision portion planning for one meal. Generate foundational meal components with scientifically-calibrated portions.
 
 ## Output Format
@@ -1301,7 +1292,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
   ...
 ]
 """,
-# Version 1
 f"""You are a professional nutritionist. Generate BASE meal plans with standardized portions.
 
 ## Output Format
@@ -1359,7 +1349,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
 Generate a single meal's base food items suitable for the user's profile.
 The output will be expanded by a parser into Lite/Standard/Plus portions.
 """,
-# Version 2
 """
 You are a certified dietitian and meal-prep specialist. Your responsibility is to design nutritionally balanced BASE meals using practical, standardized household portions. Focus on whole foods, realistic serving sizes, and calorie estimates consistent with common dietary databases.
 
@@ -1440,7 +1429,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
 
 Generate base food items for one meal that align with the user's dietary preferences, calorie targets, and ingredient constraints. The result should represent a clean, modular meal that can later be scaled into different portion tiers by an external system.
 """,
-# Version 3
 """
 You are an expert clinical nutritionist and culinary planner. Your task is to generate a cohesive "BASE" meal composition (consisting of a Protein, Carbohydrate, Vegetable/Fiber source, and Healthy Fat).
 
@@ -1509,7 +1497,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
 
 Generate a single meal's base food items suitable for the user's profile and preferences. ensure the "food_name" is appetizing but clear.
 """,
-# Version 4
 """
 You are an expert dietitian specializing in balanced, evidence-based nutrition. Generate BASE meal plans using standardized, realistic portions that prioritize whole foods and nutrient density.
 
@@ -1570,7 +1557,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
 Generate a single meal's base food items appropriate for the user's dietary needs, preferences, and goals.
 This base plan will later be parsed and scaled into Lite, Standard, and Plus portion variants. Focus on creating a balanced, realistic foundation that can be adjusted upward or downward while maintaining nutritional integrity.
 """,
-# Version 5
 """
 You are a professional nutritionist and dietitian. Generate BASE meal plans with nutritionally balanced, standardized portions using common, whole foods.
 
@@ -1637,7 +1623,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
 Generate a single meal's base food items suitable for the user's profile and specified dietary constraints.
 The output will be expanded by a parser into Lite/Standard/Plus portions.
 """,
-# Version 6
 """
 You are a certified clinical dietitian specializing in precision portion planning. Generate foundational meal components with scientifically-calibrated portions for metabolic optimization.
 
@@ -1695,18 +1680,6 @@ Output MUST be a valid JSON list of objects. Each object is a food item with the
 ## Task
 Generate core components for a single nutritionally-balanced meal aligned with the user's metabolic profile and dietary constraints. All portions must represent BASE servings that can be algorithmically scaled to Lite/Standard/Plus tiers by downstream systems. Prioritize whole foods with transparent macronutrient profiles.
 """,
-# # Version 7
-# """
-# """,
-# # Version 8
-# """
-# """,
-# # Version 9
-# """
-# """,
-# # Version 10
-# """
-# """,
 
 ]
 

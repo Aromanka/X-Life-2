@@ -11,7 +11,7 @@ from config_loader import get_config
 BATCH_SIZE = 128  # 100 nodes each batch
 USE_LOCAL_MODEL = True # True for local embedding model
 
-EMBEDDING_DIM = 768  # default value, will be replaced later
+EMBEDDING_DIM = 768
 
 # Initialize model
 if USE_LOCAL_MODEL:

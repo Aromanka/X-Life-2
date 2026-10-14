@@ -1,6 +1,6 @@
 """
 Import knowledge graph data from JSON/CSV files into Neo4j database.
-Run after build_kg_deepseek.py has generated the output files.
+Run after build_kg_2_steps.py has generated the output files.
 """
 import os
 import json
