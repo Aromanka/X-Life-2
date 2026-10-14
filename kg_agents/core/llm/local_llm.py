@@ -22,7 +22,6 @@ _load_failed = False
 
 
 def _load_local_model():
-    """Lazy load the local model"""
     global _local_model, _local_processor, _load_failed
 
     if _local_model is not None:
