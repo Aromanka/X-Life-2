@@ -5,7 +5,6 @@ from datetime import datetime
 from config_loader import get_config
 from core.llm.utils import parse_json_response
 
-# Lazy imports to avoid heavy dependencies when using API mode
 _local_model = None
 _local_processor = None
 
