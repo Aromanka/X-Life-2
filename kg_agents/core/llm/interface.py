@@ -1,5 +1,5 @@
 """
-Unified LLM Interface - Provides consistent API for both local and API LLM modes
+Unified LLM Interface
 """
 import traceback
 from typing import List, Dict, Optional, Any
