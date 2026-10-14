@@ -72,10 +72,6 @@ class DietPipeline:
 
     def __init__(self, world_model_scorer=None):
         self.safeguard = SafeguardAgent()
-        # Optional dependency-injected world-model scorer.  Loading the
-        # research VLM is intentionally left to the application layer; when
-        # supplied, this callable must return a learned ranking score for one
-        # candidate and the same participant state.
         self.world_model_scorer = world_model_scorer
 
     def generate(
