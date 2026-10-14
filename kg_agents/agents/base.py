@@ -312,7 +312,7 @@ class DietAgentMixin:
                 # Fallback to keyword search if vector search fails
                 use_vector_search = False
 
-        # === Fallback: Keyword-based Search (original logic) ===
+
         if not use_vector_search:
             # Extract words from user query
             print(f"user_query={user_query}")
@@ -780,7 +780,7 @@ class ExerciseAgentMixin:
                 print(f"[WARN] GraphRAG search failed, falling back to keyword search: {e}")
                 use_vector_search = False
 
-        # === Fallback: Keyword-based Search (original logic) ===
+
         if not use_vector_search:
             # Extract words from user query
             keywords = get_keywords(user_query)
