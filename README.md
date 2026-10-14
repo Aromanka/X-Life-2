@@ -11,7 +11,7 @@
 [![Citation](https://img.shields.io/badge/Citation-CITATION.cff-lightgrey)](./CITATION.cff)
 
 <p align="center">
-  <strong>X-Life</strong> is a metabolic world-model system for adaptive lifestyle medicine that translates continuous physiological data and sensing into personalised, quantitative dietary and postprandial activity prescriptions, concurrently meeting individual lifestyle preferences, contextual settings and safety constraints.
+  <strong>X-Life</strong> combines physiological data, a knowledge graph and a metabolic world model to generate personalised diet and exercise prescriptions.
 </p>
 
 ## 📋 Table of Contents
@@ -52,7 +52,7 @@
 
 ## 🌟 Overview
 
-This repository contains the Python code and minimal dataset for the paper **"A metabolic world model system for personalised lifestyle medicine"**. The Unity AR client is distributed separately as the external `XLIFE-AR.zip` archive described below.
+This repository contains the Python code and minimal dataset for **"A metabolic world model system for personalised lifestyle medicine"**. The Unity AR client is distributed separately as `XLIFE-AR.zip`.
 
 
 ## 🚀 Quick Start
@@ -110,7 +110,7 @@ cd neo4j-community-5.26.21/bin/
 
 ### 1. 🕸️ Lifestyle Prescription Generation Module
 
-The knowledge-graph-guided lifestyle prescription generation module generates personalized diet and exercise prescriptions by grounding LLM outputs in a hybrid vector-graph metabolic knowledge base, safeguarded by a safety module that enforces clinical safety through semantic auditing and deterministic constraints.
+This module generates diet and exercise prescriptions from a hybrid graph and vector knowledge base. The safety module checks each prescription with semantic rules and deterministic constraints.
 
 #### Configuration Steps
 
@@ -214,28 +214,29 @@ curl -X POST http://localhost:5000/api/v1/safety/evaluate \
   }'
 ```
 
-For detailed prompt sample of prescription generation, prescription assessment and knowledge graph extraction, you can refer to [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md)
+Prompt examples for generation, assessment and knowledge-graph extraction are in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
 
 ### 2. 🧠 Diet/Exercise Sub-world model and Ranking Module
 
-Diet/Exercise sub-world models simulate future glucose trajectories and rank candidate diet and exercise prescriptions using lifestyle records and physiological data.
+This module predicts future glucose trajectories for candidate diet and exercise prescriptions and ranks them.
 
 **1. Data Preparation**
 
-Prepare participant metadata, meal images and descriptions, exercise records and CGM trajectories following [minimal_dataset/sample_data.json](./minimal_dataset/sample_data.json). Provide the corresponding training annotations and preference pairs for encoder pre-training and alignment.
+Prepare participant metadata, meal images and descriptions, exercise records and CGM trajectories using [minimal_dataset/sample_data.json](./minimal_dataset/sample_data.json). Add training annotations and preference pairs when running encoder pre-training or alignment.
 
 **2. Model Configuration**
 
-Copy the configuration template and set the local Qwen3-8B and Qwen2.5-VL-72B-Instruct paths, image directory and training parameters:
+Copy the configuration template and set the local model paths, image directory and training parameters:
 
 ```bash
 cp configs/local.example.json configs/local.json
 ```
 
-> **Note** The Qwen2.5-VL-72B-Instruct backbone used for diet-action representation is supervised fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The resulting diet-information-tuned model (together with its projection head) serves as the diet action encoder.
+> **Note.** The diet action encoder uses a Qwen2.5-VL-72B-Instruct backbone fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The fine-tuned backbone and its projection head are required for the manuscript model.
+
 **3. Training**
 
-Run the following commands from the repository root with your training data:
+Run these commands from the repository root:
 
 ```bash
 # Encode structured training annotations with local Qwen3
@@ -264,24 +265,21 @@ python 'world_model+ranking_module/train.py' --config configs/local.json \
   --output outputs/professional
 ```
 
-For physiological and user alignment, select the corresponding `--stage`, set `--participant-id`, initialize from the previous stage and supply earlier preference files through `--replay`. Use `--phase participant_update` for subsequent updates and `--export-inference` to save inference weights.
+For physiological and user alignment, select the corresponding `--stage`, set `--participant-id`, initialize from the previous stage and pass earlier preference files through `--replay`. Use `--phase participant_update` for later updates and `--export-inference` to save inference weights.
 
-For model details, see [docs/METHOD.md](./docs/METHOD.md). Training options are available through `python 'world_model+ranking_module/train.py' --help`.
+See [docs/METHOD.md](./docs/METHOD.md) for model details. Run `python 'world_model+ranking_module/train.py' --help` for available options.
 
 ### 3. 🛡️ Safety Module
 
-A safety module based on retrieval-augmented generation enforces safety constraints for lifestyle prescriptions. Configure the local DeepSeek-R1 service in `kg_agents/config.json`. The system prompts are provided in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
+The safety module uses retrieval-augmented generation and explicit safety constraints. Configure the local DeepSeek-R1 service in `kg_agents/config.json`. Prompts are in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
 
 ### 4. 🧬 Multi-omics Model
 
-Structured omics annotations provide auxiliary supervision during world-model training. The omics prediction head is removed during inference. See [docs/METHOD.md](./docs/METHOD.md) for the training procedure.
+Structured omics annotations provide auxiliary targets during world-model training. The omics prediction head is removed at inference. See [docs/METHOD.md](./docs/METHOD.md) for details.
 
 ### 5. 🥽 AR Deployment
 
-The external Unity project targets **XREAL AR** devices to:
-- Embed a web page as the main UI via **Vuplex 3D WebView** (WebView scene)
-- Trigger **XREAL RGB Camera** capture / screen recording from the web page (camera capture scene)
-- Send capture results (photos/videos, local file paths / local HTTP URLs, etc.) back to the web page via `postMessage`
+The external Unity project targets **XREAL AR** devices. It embeds the web UI with **Vuplex 3D WebView**, captures images and video with the **XREAL RGB Camera**, and sends the results back to the web page through `postMessage`.
 
 #### Hardware / Platform
 
@@ -295,13 +293,13 @@ The external Unity project targets **XREAL AR** devices to:
 - **Unity**: `2022.3.x` (this project uses `2022.3.61t8` in `ProjectSettings/ProjectVersion.txt`)
 - **Unity Hub modules**: Android Build Support (SDK / NDK / OpenJDK)
 - **Optional**: `adb` (usually not needed if you use Unity's Build & Run; needed for CLI install/debugging)
-- **Download**: Please download the complete Unity project [XLIFE-AR.zip](https://drive.google.com/file/d/1Ul-z-lDQSRvFw9aqk6uxIVhMamKpvAJM/view?usp=sharing)
+- **Download**: Download the complete Unity project [XLIFE-AR.zip](https://drive.google.com/file/d/1Ul-z-lDQSRvFw9aqk6uxIVhMamKpvAJM/view?usp=sharing)
 
 #### Dependencies
 
-The Python/Neo4j modules in this repository are separate from the Unity client. The Unity project is distributed as the external `XLIFE-AR.zip` archive linked below; Unity `Assets/`, `Packages/`, and `ProjectSettings/` are not included in this repository.
+The Python and Neo4j modules are separate from the Unity client. The external `XLIFE-AR.zip` archive contains the Unity project; `Assets/`, `Packages/` and `ProjectSettings/` are not included here.
 
-> The two most common blockers are: **Vuplex (commercial, not included in the repo)** + **XREAL XR Plugin (provided as a local tar package)**.
+> Vuplex must be purchased and imported separately. The XREAL XR Plugin is included in the external archive.
 
 ##### A. Vuplex 3D WebView (Required, Not Included)
 
@@ -317,7 +315,7 @@ The Python/Neo4j modules in this repository are separate from the Unity client. 
 
 ##### C. Unity Package Manager Dependencies (Auto-installed)
 
-After opening the project, Unity resolves dependencies from `Packages/manifest.json` automatically (e.g., Input System / AR Foundation / XR Interaction Toolkit). In most cases you do not need to install anything manually in Package Manager.
+After opening the project, Unity resolves the dependencies in `Packages/manifest.json` automatically.
 
 #### Project Setup
 
@@ -330,7 +328,7 @@ After opening the project, Unity resolves dependencies from `Packages/manifest.j
 
 ##### 4.2 (Optional) Configure iFLYTEK Speech Recognition
 
-**REQUIRED if you want to use speech recognition features.**
+Required for speech recognition.
 
 The speech recognition config file is: `Assets/Resources/XunfeiConfig.json`
 
@@ -341,7 +339,7 @@ The speech recognition config file is: `Assets/Resources/XunfeiConfig.json`
    - `apiKey`: Your API Key
    - `apiSecret`: Your API Secret
 
-Alternatively, you can create a ScriptableObject config in Unity Editor:
+Alternatively, create a ScriptableObject config in Unity:
 
 - Right-click in Project window → Create → XLIFE AR → Xunfei Speech Recognition Config
 - Set the credentials in the Inspector
