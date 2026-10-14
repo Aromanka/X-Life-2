@@ -45,11 +45,6 @@ VISION_MODELS = {
         'hidden_size': 1024,
         'description': 'Qwen3-VL 8B embedding model, specialized for image-text embedding'
     },
-    'cnn-backup': {
-        'name': 'CNN Backup',
-        'hidden_size': 512,
-        'description': 'Simple CNN encoder, backup solution for vision models'
-    }
 }
 
 # Default model configurations
@@ -171,52 +166,6 @@ TRAINING_CONFIGS = {
         'split_seeds': [42, 43, 44, 45, 46],
         'split_index': 0
     },
-    'small_model': {
-        'model_key': 'qwen3-embedding-0.6b',
-        'vision_model_key': 'cnn-backup',
-        'model_name': 'CGM Prediction with Small Models',
-        'batch_size': 8,
-        'learning_rate': 1e-4,
-        'num_epochs': 30,
-        'early_stopping_patience': 8,
-        'lr_scheduler_patience': 4,
-        'weight_decay': 1e-5,
-        'gradient_clip_norm': 1.0,
-        'log_interval': 10,
-        'eval_interval': 1,
-        'save_interval': 5,
-        'use_image_features': True,
-        'image_size': (224, 224),
-        'gradient_accumulation_steps': 4,
-        'training_phase': 'encoder_pretraining',
-        'freeze_action_encoders': False,
-        'preference_beta': 0.1,
-        'split_seeds': [42, 43, 44, 45, 46],
-        'split_index': 0
-    },
-    'cnn_only': {
-        'model_key': 'qwen3-embedding-0.6b',
-        'vision_model_key': 'cnn-backup',
-        'model_name': 'CGM Prediction with CNN Only',
-        'batch_size': 8,
-        'learning_rate': 1e-4,
-        'num_epochs': 50,
-        'early_stopping_patience': 10,
-        'lr_scheduler_patience': 5,
-        'weight_decay': 1e-5,
-        'gradient_clip_norm': 1.0,
-        'log_interval': 10,
-        'eval_interval': 1,
-        'save_interval': 5,
-        'use_image_features': True,
-        'image_size': (224, 224),
-        'gradient_accumulation_steps': 4,
-        'training_phase': 'world_model',
-        'freeze_action_encoders': True,
-        'preference_beta': 0.1,
-        'split_seeds': [42, 43, 44, 45, 46],
-        'split_index': 0
-    }
 }
 
 def get_model_config(model_key=None):

@@ -402,36 +402,3 @@ def generate_diet_candidates(
         meal_type, temperature, top_p, top_k, user_preference, use_vector, rag_topk,
         kg_context=kg_context
     )
-
-
-if __name__ == "__main__":
-    # Test the generator
-    test_input = {
-        "user_metadata": {
-            "age": 35,
-            "gender": "male",
-            "height_cm": 175,
-            "weight_kg": 70,
-            "medical_conditions": ["diabetes"],
-            "dietary_restrictions": ["low_sodium"],
-            "fitness_level": "intermediate"
-        },
-        "environment": {
-            "weather": {"condition": "clear", "temperature_c": 25},
-            "time_context": {"season": "summer"}
-        },
-        "user_requirement": {
-            "goal": "weight_loss"
-        },
-        "num_variants": 3
-    }
-
-    candidates = generate_diet_candidates(**test_input)
-    # DEBUG print
-    # print(f"Generated {len(candidates)} diet candidates")
-    # for c in candidates:
-    #     print(f"\n[ID:{c.id}] {c.meal_type.upper()} - {c.variant}")
-    #     print(f"  Target: {c.target_calories} kcal | Actual: {c.total_calories} kcal | Deviation: {c.calories_deviation}%")
-    #     for item in c.items:
-    #         print(f"  - {item.food}: {item.portion} ({item.calories} kcal)")
-

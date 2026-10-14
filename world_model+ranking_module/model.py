@@ -339,7 +339,7 @@ class PrescriptionRankingHead(nn.Module):
 
 
 class CGMPredictionModelWithImage(nn.Module):
-    """Shared action-conditioned model for all three own-method training phases."""
+    """Shared action-conditioned model for three training phases."""
     training_only_prefixes = ("diet_annotation_head.", "exercise_annotation_head.", "omics_head.",
                               "diet_aux_decoder.", "exercise_aux_decoder.")
 

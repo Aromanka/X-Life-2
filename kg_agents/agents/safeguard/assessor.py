@@ -146,8 +146,6 @@ class SafeguardAgent(BaseAgent):
             # and should not be treated as an empty safe result.
             checks.append(self._llm_schema_failure("assessment"))
 
-        # --- MOVED SCORING LOGIC HERE ---
-
         if SAFETY_MEASURE == 1:
             # Calculate score based on ALL checks (Rules + LLM)
             passed_checks = sum(1 for c in checks if c.passed)

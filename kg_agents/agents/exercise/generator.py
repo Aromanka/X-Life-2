@@ -772,31 +772,3 @@ def generate_exercise_variants(
         result[base_plan.id] = variants
 
     return result, kg_context
-
-
-if __name__ == "__main__":
-    # Test the generator
-    test_input = {
-        "user_metadata": {
-            "age": 35,
-            "gender": "male",
-            "height_cm": 175,
-            "weight_kg": 70,
-            "medical_conditions": ["diabetes"],
-            "fitness_level": "intermediate"
-        },
-        "environment": {
-            "weather": {"condition": "clear", "temperature_c": 25},
-            "time_context": {"season": "summer"}
-        },
-        "user_requirement": {
-            "goal": "weight_loss",
-            "intensity": "moderate",
-            "num_candidates": 2
-        }
-    }
-
-    candidates = generate_exercise_candidates(**test_input)
-    print(f"Generated {len(candidates)} exercise candidates")
-    for c in candidates:
-        print(f"- {c.title}: {c.total_calories_burned} kcal, {c.total_duration_minutes} min")

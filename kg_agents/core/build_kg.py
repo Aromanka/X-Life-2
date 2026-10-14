@@ -61,7 +61,7 @@ OVERLAP = 200
 
 def read_excel(file_path):
     """
-    [New] Read Excel and convert each row into natural language sentences
+    Read Excel and convert each row into natural language sentences
     """
     print(f"Parsing Excel: {os.path.basename(file_path)}")
     text_content = []

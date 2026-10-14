@@ -590,7 +590,6 @@ class CGMPredictionTrainerWithImage:
         """Initialize model"""
         print("Initializing model...")
 
-        # Create model using HF mirror
         self.model = CGMPredictionModelWithImage(
             model_key=self.model_key,
             text_hidden_dim=self.text_hidden_dim,

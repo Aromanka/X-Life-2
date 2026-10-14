@@ -107,9 +107,6 @@ class LocalLLM:
         """Send chat request, return text content"""
         start_time = datetime.now()
 
-        # Debug print generation params
-        # print(f"[DEBUG] LLM params: temp={temperature}, top_p={top_p}, top_k={top_k}")
-
         # Convert messages to text format for local model
         text_content = self._messages_to_text(messages)
 
@@ -163,9 +160,6 @@ class LocalLLM:
         import re
 
         start_time = datetime.now()
-
-        # Debug print generation params
-        # print(f"[DEBUG] LLM params: temp={temperature}, top_p={top_p}, top_k={top_k}")
 
         text_content = self._messages_to_text(messages)
         model, processor = _load_local_model()

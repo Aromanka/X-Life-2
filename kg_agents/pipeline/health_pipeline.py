@@ -369,38 +369,3 @@ def generate_health_plans(
         output = pipeline.filter_safe_candidates(output, min_score)
 
     return output.to_dict()
-
-
-if __name__ == "__main__":
-    # Test the pipeline
-    test_input = {
-        "user_metadata": {
-            "age": 35,
-            "gender": "male",
-            "height_cm": 175,
-            "weight_kg": 70,
-            "medical_conditions": ["diabetes"],
-            "dietary_restrictions": ["low_sodium"],
-            "fitness_level": "intermediate"
-        },
-        "environment": {
-            "weather": {"condition": "clear", "temperature_c": 25},
-            "time_context": {"season": "summer"}
-        },
-        "user_requirement": {
-            "goal": "weight_loss",
-            "intensity": "moderate"
-        },
-        "num_candidates": 2,
-        "filter_safe": True,
-        "min_score": 60
-    }
-
-    print("=== Testing Health Pipeline ===\n")
-
-    result = generate_health_plans(**test_input)
-
-    print(f"Diet candidates: {len(result['diet_candidates'])}")
-    print(f"Exercise candidates: {len(result['exercise_candidates'])}")
-    print(f"Overall score: {result['combined_assessment']['overall_score']}")
-    print(f"Is safe: {result['combined_assessment']['is_safe']}")

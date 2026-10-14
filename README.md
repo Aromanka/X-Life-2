@@ -381,8 +381,6 @@ The minimal dataset is available at [`./minimal_dataset/`](./minimal_dataset/). 
 - 2 nocturnal windows with rule-derived hypoglycemia labels;
 - `manifest.json` with event counts and image hashes.
 
-Data descriptions are provided in [minimal_dataset/README.md](./minimal_dataset/README.md).
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
