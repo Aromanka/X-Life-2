@@ -109,7 +109,7 @@ cd neo4j-community-5.26.21/bin/
 
 ### 1. 🕸️ Lifestyle Prescription Generation Module
 
-This module generates diet and exercise prescriptions from a hybrid graph and vector knowledge base. The safety module checks each prescription with semantic rules and deterministic constraints.
+This module generates diet and exercise prescriptions from a hybrid graph and vector knowledge base.
 
 #### Configuration Steps
 
@@ -217,7 +217,7 @@ Prompt examples for generation, assessment and knowledge-graph extraction are in
 
 ### 2. 🧠 Diet/Exercise Sub-world model and Ranking Module
 
-This module predicts future glucose trajectories for candidate diet and exercise prescriptions and ranks them.
+Diet/Exercise sub-world models simulate future glucose state and Ranking module ranks candidate diet and exercise prescriptions.
 
 **1. Data Preparation**
 
@@ -225,13 +225,13 @@ Prepare participant metadata, meal images and descriptions, exercise records and
 
 **2. Model Configuration**
 
-Copy the configuration template and set the local model paths, image directory and training parameters:
+Copy the configuration template and set the local Qwen3-8B and Qwen2.5-VL-72B-Instruct paths, image directory and training parameters:
 
 ```bash
 cp configs/local.example.json configs/local.json
 ```
 
-> **Note.** The diet action encoder uses a Qwen2.5-VL-72B-Instruct backbone fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The fine-tuned backbone and its projection head are required for the manuscript model.
+> **Note.** The diet action encoder uses a Qwen2.5-VL-72B-Instruct backbone fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods.
 
 **3. Training**
 
@@ -266,7 +266,7 @@ python 'world_model+ranking_module/train.py' --config configs/local.json \
 
 For physiological and user alignment, select the corresponding `--stage`, set `--participant-id`, initialize from the previous stage and pass earlier preference files through `--replay`. Use `--phase participant_update` for later updates and `--export-inference` to save inference weights.
 
-See [docs/METHOD.md](./docs/METHOD.md) for model details. Run `python 'world_model+ranking_module/train.py' --help` for available options.
+Run `python 'world_model+ranking_module/train.py' --help` for available options.
 
 ### 3. 🛡️ Safety Module
 
@@ -274,7 +274,7 @@ The safety module uses retrieval-augmented generation and explicit safety constr
 
 ### 4. 🧬 Multi-omics Model
 
-Structured omics annotations provide auxiliary targets during world-model training. The omics prediction head is removed at inference. See [docs/METHOD.md](./docs/METHOD.md) for details.
+Structured omics annotations provide auxiliary targets during world-model training. The omics prediction head is removed at inference. 
 
 ### 5. 🥽 AR Deployment
 
@@ -300,32 +300,32 @@ The Python and Neo4j modules are separate from the Unity client. The external `X
 
 > Vuplex must be purchased and imported separately. The XREAL XR Plugin is included in the external archive.
 
-##### A. Vuplex 3D WebView (Required, Not Included)
+##### A. Vuplex 3D WebView
 
 - Purchase and import (Unity Asset Store): [Vuplex 3D WebView for Android (with Gecko Engine)](https://assetstore.unity.com/packages/tools/network/vuplex-3d-webview-for-android-with-gecko-engine-245867)
 - After importing, you should see: `Assets/Vuplex/WebView/...`, and be able to use `CanvasWebViewPrefab` in scenes
 - Note: if you want to run WebView directly in the macOS/Windows Editor, you may need to install the native plugins for those platforms per Vuplex docs; building for Android only is fine
 
-##### B. XREAL XR Plugin (Required, Provided in the External Unity Archive)
+##### B. XREAL XR Plugin
 
 - Included in the external `XLIFE-AR.zip` archive: `Packages/com.xreal.xr.tar.gz`
 - The external Unity project's `Packages/manifest.json` references the local package: `"com.xreal.xr": "@com.xreal.xr.tar.gz"`
 - To upgrade the plugin: replace `Packages/com.xreal.xr.tar.gz` and keep the `manifest.json` reference consistent
 
-##### C. Unity Package Manager Dependencies (Auto-installed)
+##### C. Unity Package Manager Dependencies
 
 After opening the project, Unity resolves the dependencies in `Packages/manifest.json` automatically.
 
 #### Project Setup
 
-##### 4.1 Configure the WebView Initial URL
+##### 1. Configure the WebView Initial URL
 
 1. Open the scene: `Assets/Scenes/WebView.unity`
 2. Select `CanvasWebViewPrefab` in the scene hierarchy
 3. Set `InitialUrl` to your web URL
    - Current example value: `https://xlife.chat/MainPage/AR`
 
-##### 4.2 (Optional) Configure iFLYTEK Speech Recognition
+##### 2. (Optional) Configure iFLYTEK Speech Recognition
 
 Required for speech recognition.
 
