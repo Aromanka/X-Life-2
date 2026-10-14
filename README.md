@@ -11,9 +11,7 @@
 [![Citation](https://img.shields.io/badge/Citation-CITATION.cff-lightgrey)](./CITATION.cff)
 
 <p align="center">
-  <strong>X-Life</strong> combines physiological data, a knowledge graph and a metabolic world model to generate personalised diet and exercise prescriptions.
-</p>
-
+  <strong>X-Life</strong> is a metabolic world-model system for adaptive lifestyle medicine that translates continuous physiological data and sensing into personalised, quantitative dietary and postprandial activity prescriptions, concurrently meeting individual lifestyle preferences, contextual settings and safety constraints.
 ## 📋 Table of Contents
 
 - [📋 Table of Contents](#-table-of-contents)
