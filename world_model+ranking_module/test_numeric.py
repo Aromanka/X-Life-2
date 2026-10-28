@@ -1,11 +1,14 @@
 import os
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch
 import torch
 from dataset import cgm_window
 from world_model import MetabolicWorldModel, llm_actions_enabled
-from train import evaluate
+from train import evaluate, split_samples, temporal_overlap, curve_metrics, main
 
 
 class NumericTests(unittest.TestCase):
@@ -69,6 +72,58 @@ class NumericTests(unittest.TestCase):
         self.assertAlmostEqual(metrics['mae'],3.)
         self.assertAlmostEqual(metrics['pearson'],1.)
         self.assertEqual(metrics['valid_points'],3)
+        self.assertEqual(metrics['domains']['diet']['mae'],3.)
+        self.assertEqual(metrics['horizons']['30']['mae'],3.)
+
+    def test_temporal_split(self):
+        rows = [dict(subject_id=s,origin=f'2025-01-01T{h:02}:00:00',mode='diet') for s in ('a','b') for h in (14,8,12,10)]
+        groups,splits = split_samples(rows,'within_subject',42)
+        self.assertEqual(len(groups['train']),4); self.assertEqual(len(groups['validation']),4)
+        self.assertEqual(groups['test'],[])
+        for subject in ('a','b'):
+            self.assertLess(max(s['origin'] for s in groups['train'] if s['subject_id']==subject),min(s['origin'] for s in groups['validation'] if s['subject_id']==subject))
+        restored,_ = split_samples(list(reversed(rows)),'within_subject',42,splits)
+        self.assertEqual({s['origin']+s['subject_id'] for s in restored['train']},{s['origin']+s['subject_id'] for s in groups['train']})
+        self.assertGreater(temporal_overlap(groups),0)
+
+    def test_subject_split(self):
+        rows = [dict(subject_id=str(i),origin='2025-01-01T12:00:00',mode='diet') for i in range(20)]
+        groups,_ = split_samples(rows,'subject',42)
+        self.assertEqual([len(groups[k]) for k in ('train','validation','test')],[16,2,2])
+        self.assertFalse({s['subject_id'] for s in groups['train']} & {s['subject_id'] for s in groups['validation']})
+
+    def test_missing_horizon(self):
+        row=dict(predicted=[2.]*36,observed=[1.]*36,mask=[False]*6+[True]*30,last_observed=1.)
+        metrics=curve_metrics([row])
+        self.assertIsNone(metrics['horizons']['30']['mae'])
+        self.assertEqual(metrics['persistence_mae'],0.)
+        self.assertEqual(metrics['invalid_correlations'],1)
+
+    def test_selection_and_training_control(self):
+        class Rows:
+            skipped = 0
+            def __len__(self): return len(self.samples)
+        dataset = Rows(); dataset.samples = []
+        for i,hour in enumerate((8,10,12,14)):
+            row = {key:value[0].clone() for key,value in self.batch.items()}
+            row.update(subject_id='a',origin=f'2025-01-01T{hour:02}:00:00',mode='diet' if i%2==0 else 'exercise',joint=True,exercise_type='',diet_text='',exercise_text='',target=torch.ones(36)*6,target_mask=torch.ones(36,dtype=torch.bool))
+            dataset.samples.append(row)
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)/'config.json'
+            config.write_text(json.dumps({'model':{'dimension':16,'basis_dim':8,'heads':2,'layers':1}}))
+            args = ['--data','unused','--config',str(config),'--split-strategy','within_subject','--epochs','20','--batch-size','1','--device','cpu','--output',directory]
+            with patch('train.XLifeCleanedDataset',return_value=dataset),patch('train.evaluate',return_value=({'mae':1.},[])),patch('builtins.print'):
+                main(args)
+            best = torch.load(Path(directory)/'best.pt',weights_only=False)
+            last = torch.load(Path(directory)/'checkpoint.pt',weights_only=False)
+            self.assertEqual(best['epoch'],1); self.assertEqual(last['epoch'],11)
+            self.assertEqual(last['bad_epochs'],10)
+            self.assertLess(last['optimizer']['param_groups'][0]['lr'],.0001)
+            with patch('train.XLifeCleanedDataset',return_value=dataset),patch('train.evaluate',return_value=({'mae':.8},[])),patch('builtins.print'):
+                main(args+['--resume',str(Path(directory)/'checkpoint.pt'),'--epochs','1'])
+            resumed = torch.load(Path(directory)/'checkpoint.pt',weights_only=False)
+            self.assertEqual(resumed['epoch'],12); self.assertEqual(resumed['bad_epochs'],0)
+            self.assertEqual(resumed['best_mae'],.8)
 
 
 if __name__ == '__main__': unittest.main()
