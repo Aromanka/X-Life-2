@@ -15,7 +15,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from PIL import Image
-from transformers import AutoModel, AutoProcessor
 
 
 def local_model_directory(path, label):
@@ -53,6 +52,7 @@ class TextEncoder(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         if language_model is None:
+            from transformers import AutoModel
             path = local_model_directory(qwen_model_path, "qwen_model_path")
             language_model = AutoModel.from_pretrained(
                 path, local_files_only=True, trust_remote_code=True, torch_dtype="auto"
@@ -96,6 +96,7 @@ class ImageEncoder(nn.Module):
         if force_cnn:
             raise ValueError("Diet encoding requires a joint vision-language model.")
         if vision_model is None:
+            from transformers import AutoModel, AutoProcessor
             path = local_model_directory(model_path, "vision_model_path")
             vision_model = AutoModel.from_pretrained(
                 path, local_files_only=True, trust_remote_code=True, torch_dtype="auto"

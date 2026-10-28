@@ -1,198 +1,147 @@
-"""Train X-Life encoders, world model and sequential preference alignment."""
-from __future__ import annotations
-
 import argparse
-from contextlib import nullcontext
-from dataclasses import asdict
 import json
-from pathlib import Path
 import random
-import numpy as np
+from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
-
-from dataset import get_tokenizer
-from model import CGMPredictionModelWithImage
-from training import (LossWeights, configure_training_phase, set_training_mode,
-                      encoder_pretraining_objective, world_model_objective,
-                      preference_objective, FrozenRankingReference, to_device)
-from train_data import (event_records, event_dataset, PreferencePairs, ReplayPairs,
-                        read_records, collate_events, collate_pairs)
+from dataset import XLifeCleanedDataset, SampleNumericDataset
+from world_model import MetabolicWorldModel, llm_actions_enabled
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', required=True, help='JSON with model/data/training settings and local Qwen paths.')
-    parser.add_argument('--phase', required=True, choices=['encoder_pretraining', 'world_model', 'preference_alignment', 'participant_update'])
-    parser.add_argument('--data', required=True, help='Annotated events or factual observed CGM events, JSON/JSONL.')
-    parser.add_argument('--pairs', help='Preferred/rejected actions sharing one context, JSON/JSONL.')
-    parser.add_argument('--stage', choices=['professional', 'physiological', 'user'])
-    parser.add_argument('--replay', nargs='*', default=[], help='Previous-stage pair files.')
-    parser.add_argument('--init-checkpoint', help='Previous training-phase/stage checkpoint.')
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--epochs', type=int)
-    parser.add_argument('--participant-id', help='Restrict participant adaptation to this ID.')
-    parser.add_argument('--device', default=None)
-    parser.add_argument('--export-inference', action='store_true', help='Export core weights without training-only heads.')
-    return parser.parse_args(argv)
+def collate(rows, vocabulary):
+    batch = {key: torch.stack([row[key] for row in rows]) for key in ('diet', 'exercise', 'metadata', 'onset', 'history', 'history_mask', 'target', 'target_mask')}
+    batch['type_id'] = torch.tensor([vocabulary.get(row['exercise_type'], 0) for row in rows])
+    for key in ('diet_text', 'exercise_text', 'subject_id', 'origin'): batch[key] = [row[key] for row in rows]
+    return batch
 
 
-def cycle_next(loader, iterator):
-    try:
-        return next(iterator), iterator
-    except StopIteration:
-        iterator = iter(loader)
-        return next(iterator), iterator
+def device_batch(batch, device): return {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
+
+
+def evaluate(model, samples, vocabulary, device, batch_size, mode=None):
+    model.eval()
+    absolute, points, correlations, invalid, predictions = 0., 0, [], 0, []
+    for domain in ([mode] if mode else ['diet', 'exercise']):
+        rows = [s for s in samples if s['joint']] if domain == 'joint' else [s for s in samples if s['mode'] == domain]
+        for batch in DataLoader(rows, batch_size=batch_size, collate_fn=lambda rows: collate(rows, vocabulary)):
+            data = device_batch(batch, device)
+            with torch.no_grad(): predicted = model(data, domain)['predicted_cgm'].cpu()
+            if not torch.isfinite(predicted).all(): raise FloatingPointError('Nonfinite prediction')
+            for i, (p, y, mask) in enumerate(zip(predicted, batch['target'], batch['target_mask'])):
+                absolute += float((p[mask]-y[mask]).abs().sum()); points += int(mask.sum())
+                if mask.sum() > 1 and p[mask].std() > 1e-8 and y[mask].std() > 1e-8:
+                    correlations.append(float(torch.corrcoef(torch.stack([p[mask], y[mask]]))[0, 1]))
+                else: invalid += 1
+                predictions.append(dict(subject_id=batch['subject_id'][i], origin=batch['origin'][i], mode=domain, predicted=p.tolist(), observed=y.tolist(), mask=mask.tolist()))
+    return dict(mae=absolute/points if points else None, pearson=sum(correlations)/len(correlations) if correlations else None, valid_points=points, valid_correlations=len(correlations), invalid_correlations=invalid), predictions
 
 
 def main(argv=None):
-    args = parse_args(argv)
-    config = json.loads(Path(args.config).read_text(encoding='utf-8'))
-    model_config, data_config, settings = config['model'], config.get('data', {}), config.get('training', {})
-    seed = int(settings.get('seed', 42))
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
-    annotation_dim = int(model_config.get('annotation_dim', 4096))
-    epochs = int(args.epochs or settings.get('epochs', 1))
-    batch_size = int(settings.get('batch_size', 1))
-    accumulation = int(settings.get('gradient_accumulation_steps', 1))
-    if epochs < 1 or batch_size < 1 or accumulation < 1:
-        raise ValueError("Epochs, batch size and accumulation must be positive.")
-    weights = LossWeights(**settings.get('loss_weights', {}))
-    alignment = args.phase in {'preference_alignment', 'participant_update'}
-    if alignment and (not args.stage or not args.pairs):
-        raise ValueError("Preference alignment needs --stage and --pairs.")
-    if alignment and args.stage != 'professional' and not args.participant_id:
-        raise ValueError("Physiological/user alignment is participant-specific; supply --participant-id.")
-    if args.phase == 'participant_update' and args.stage == 'professional':
-        raise ValueError("Participant updates use physiological or user preference stages.")
-    if args.phase == 'participant_update' and not args.participant_id:
-        raise ValueError("Participant updates require --participant-id.")
-    if args.phase != 'encoder_pretraining' and not args.init_checkpoint:
-        raise ValueError("Provide the previous phase/stage checkpoint; frozen action encoders must be pretrained.")
-    records = event_records(args.data, data_config.get('image_dir'))
-    if args.participant_id:
-        records = [row for row in records if str(row['subject_id']) == args.participant_id]
-    if args.phase == 'encoder_pretraining':
-        records = [row for row in records if any(row.get('training_targets', {}).get(kind) is not None
-                                                for kind in ('diet', 'exercise'))]
-        if not records:
-            raise ValueError("First encode supplied diet/exercise annotations with encode_annotations.py.")
-    if args.phase == 'world_model' and weights.omics > 0 and not any(
-            row.get('training_targets', {}).get('omics') is not None for row in records):
-        raise ValueError("No omics supervision is present. Supply cached omics targets, or explicitly set omics=0 for an unaugmented run.")
-    tokenizer = get_tokenizer(model_path=model_config.get('qwen_model_path'))
-    model = CGMPredictionModelWithImage(**model_config)
-    model.to(device)
-    initial = None
-    if args.init_checkpoint:
-        initial = torch.load(args.init_checkpoint, map_location='cpu', weights_only=False)
-        if initial.get('architecture_version') != 2:
-            raise ValueError("Incompatible checkpoint architecture.")
-        if initial.get('test_backend', False):
-            raise ValueError("Unsupported checkpoint backend.")
-        model.load_state_dict(initial['model_state_dict'], strict=True)
-        if args.phase == 'world_model' and initial.get('phase') != 'encoder_pretraining':
-            raise ValueError("World-model training must initialize from encoder pretraining.")
-        if args.phase == 'participant_update':
-            if initial.get('stage') not in {'professional', 'physiological', 'user'}:
-                raise ValueError("Participant adaptation requires a previously aligned checkpoint.")
-            if initial.get('stage') != 'professional' and initial.get('participant_id') != args.participant_id:
-                raise ValueError("Participant adaptation must use this participant's aligned checkpoint.")
-        previous = {'professional': None, 'physiological': 'professional', 'user': 'physiological'}
-        if alignment and args.phase != 'participant_update':
-            expected = previous[args.stage]
-            if (expected is None and initial.get('phase') != 'world_model') or (expected and initial.get('stage') != expected):
-                raise ValueError("Run professional, physiological and user alignment sequentially.")
-            if args.stage == 'user' and initial.get('participant_id') != args.participant_id:
-                raise ValueError("User alignment must initialize from this participant's physiological checkpoint.")
-    configure_training_phase(model, args.phase)
-    factual_dataset = event_dataset(records, tokenizer, data_config, annotation_dim,
-                                     require_cgm=args.phase != 'encoder_pretraining')
-    if not len(factual_dataset):
-        raise ValueError("No usable events remain after filtering.")
-    if args.phase == 'encoder_pretraining':
-        if not any(row.get('training_targets', {}).get(kind) is not None for row in records for kind in ('diet', 'exercise')):
-            raise ValueError("First encode the structured annotations with encode_annotations.py.")
-    generator = torch.Generator().manual_seed(seed)
-    factual_loader = DataLoader(factual_dataset, batch_size=batch_size, shuffle=True,
-                                 generator=generator, collate_fn=collate_events)
-    reference, training_dataset, pair_loader = None, None, None
-    if alignment:
-        pair_records = read_records(args.pairs)
-        if args.participant_id:
-            pair_records = [row for row in pair_records if str(row['context']['subject_id']) == args.participant_id]
-        current = PreferencePairs(pair_records, tokenizer, data_config, annotation_dim, args.stage)
-        previous_datasets = []
-        for path in args.replay:
-            previous_rows = read_records(path)
-            if args.participant_id:
-                previous_rows = [row for row in previous_rows if row.get('source_stage') == 'professional'
-                                 or str(row['context']['subject_id']) == args.participant_id]
-            previous_datasets.append(PreferencePairs(previous_rows, tokenizer, data_config, annotation_dim, 'replay'))
-        if not len(current):
-            raise ValueError("Preference pair dataset is empty.")
-        fraction = float(settings.get('replay_fraction', 0.25)) if args.stage != 'professional' else 0.0
-        training_dataset = ReplayPairs(current, previous_datasets, fraction, seed)
-        pair_loader = DataLoader(training_dataset, batch_size=batch_size, collate_fn=collate_pairs)
-        reference = FrozenRankingReference(model).to(device)
-    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
-                                  lr=float(settings.get('learning_rate', 1e-4)),
-                                  weight_decay=float(settings.get('weight_decay', 1e-5)))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', required=True)
+    parser.add_argument('--dataset', choices=['xlife_cleaned', 'sample'], default='xlife_cleaned')
+    parser.add_argument('--config')
+    parser.add_argument('--phase', choices=['single', 'fusion'], default='single')
+    parser.add_argument('--domain', choices=['both', 'diet', 'exercise'], default='both')
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--init-checkpoint')
+    parser.add_argument('--resume')
+    parser.add_argument('--predict-only', action='store_true')
+    parser.add_argument('--mode', choices=['diet', 'exercise', 'joint'])
+    parser.add_argument('--split', choices=['train', 'validation', 'test'], default='test')
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--max-steps', type=int)
+    parser.add_argument('--max-subjects', type=int)
+    parser.add_argument('--max-samples', type=int)
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--seed', type=int, default=42)
+    args = parser.parse_args(argv)
+    if args.epochs < 1 or args.batch_size < 1 or any(v is not None and v < 1 for v in (args.max_steps, args.max_subjects, args.max_samples)): raise ValueError('Counts must be positive')
+    if args.resume and args.init_checkpoint: raise ValueError('Choose resume or initialization')
+    random.seed(args.seed); torch.manual_seed(args.seed)
+    config = json.loads(Path(args.config).read_text(encoding='utf-8')) if args.config else {}
+    model_config = config.get('model', {})
+    settings = config.get('training', {})
+    checkpoint_path = args.resume or args.init_checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False) if checkpoint_path else None
+    if checkpoint:
+        if checkpoint.get('architecture_version') != 3: raise ValueError('Expected architecture_version 3')
+        if checkpoint['llm_actions'] != llm_actions_enabled(): raise ValueError('Checkpoint action backend differs from environment')
+        model_config = checkpoint['model_config']
+    if (args.predict_only or args.phase == 'fusion') and not checkpoint: raise ValueError('A checkpoint is required')
+    dataset = {'xlife_cleaned': XLifeCleanedDataset, 'sample': SampleNumericDataset}[args.dataset](args.data, args.max_subjects, args.max_samples)
+    if not dataset.samples: raise ValueError('No usable records')
+    ids = sorted({s['subject_id'] for s in dataset.samples})
+    if checkpoint: splits = checkpoint['splits']
+    else:
+        random.shuffle(ids)
+        train_count = max(1, int(len(ids)*.8))
+        val_count = max(1, int(len(ids)*.1)) if len(ids) >= 3 else 0
+        splits = dict(train=ids[:train_count], validation=ids[train_count:train_count+val_count], test=ids[train_count+val_count:])
+    groups = {key: [s for s in dataset.samples if s['subject_id'] in subjects] for key, subjects in splits.items()}
+    if not groups['train']: raise ValueError('No training subjects from checkpoint in selected data')
+    vocabulary = checkpoint['vocabulary'] if checkpoint else {v:i+1 for i,v in enumerate(sorted({s['exercise_type'] for s in groups['train'] if s['exercise_type']}))}
+    if len(vocabulary) >= 128: raise ValueError('Too many exercise categories')
+    model = MetabolicWorldModel(**model_config)
+    if checkpoint: model.load_state_dict(checkpoint['model_state_dict'])
+    else: model.fit(groups['train'])
+    if args.phase == 'fusion' and not args.resume and not args.predict_only:
+        if checkpoint['phase'] != 'single' or set(checkpoint['trained_domains']) != {'diet','exercise'}: raise ValueError('Fusion requires both pretrained domains')
+        model.initialize_fusion()
+    model.to(args.device)
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
-    (output / 'config.json').write_text(json.dumps(config, indent=2), encoding='utf-8')
-    history = []
-    for epoch in range(epochs):
-        set_training_mode(model)
-        if training_dataset is not None:
-            training_dataset.set_epoch(epoch)
-        loader = pair_loader if alignment else factual_loader
-        factual_iterator = iter(factual_loader)
-        optimizer.zero_grad(set_to_none=True)
-        total, count = 0.0, 0
-        for i, batch in enumerate(loader):
-            batch = to_device(batch, device)
-            precision = settings.get('mixed_precision', 'no')
-            if precision not in {'no', 'bf16'}:
-                raise ValueError("mixed_precision must be no or bf16.")
-            context = torch.autocast(device.type, dtype=torch.bfloat16) if precision == 'bf16' else nullcontext()
-            with context:
-                if alignment:
-                    observed, factual_iterator = cycle_next(factual_loader, factual_iterator)
-                    loss, components = preference_objective(model, batch, to_device(observed, device),
-                                                            reference, weights, args.stage)
-                elif args.phase == 'encoder_pretraining':
-                    loss, components = encoder_pretraining_objective(model, batch, weights)
-                else:
-                    loss, components = world_model_objective(model, batch, weights)
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Training produced a nonfinite loss.")
-            group_start = i // accumulation * accumulation
-            group_size = min(accumulation, len(loader) - group_start)
-            (loss / group_size).backward()
-            if (i + 1) % accumulation == 0 or i + 1 == len(loader):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(settings.get('gradient_clip_norm', 1.0)))
-                optimizer.step(); optimizer.zero_grad(set_to_none=True)
-            total += float(loss.detach()); count += 1
-        entry = {'epoch': epoch + 1, 'loss': total / count,
-                 'components_last_batch': {key: float(value) for key, value in components.items()},
-                 'replay_pairs': training_dataset.replay_count if training_dataset else 0,
-                 'total_pairs': len(training_dataset) if training_dataset else 0}
+    print(json.dumps(dict(records=len(dataset), skipped=dataset.skipped, splits={k:len(v) for k,v in groups.items()}, device=args.device)))
+    if args.predict_only:
+        if args.mode == 'joint' and checkpoint['phase'] != 'fusion': raise ValueError('Joint prediction requires fusion training')
+        metrics, predictions = evaluate(model, groups[args.split], vocabulary, args.device, args.batch_size, args.mode or ('joint' if checkpoint['phase']=='fusion' else None))
+        if not predictions: raise ValueError('No prediction samples in selected split/mode')
+        (output/'predictions.json').write_text(json.dumps(predictions, allow_nan=False), encoding='utf-8')
+        (output/'metrics.json').write_text(json.dumps(metrics, allow_nan=False), encoding='utf-8')
+        print(json.dumps(metrics)); return
+    model.configure_phase(args.phase)
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=settings.get('learning_rate', 1e-4))
+    history, global_step, start_epoch = [], 0, 0
+    trained_domains = set(checkpoint.get('trained_domains', [])) if checkpoint else set()
+    if args.resume:
+        if checkpoint['phase'] != args.phase: raise ValueError('Resume phase mismatch')
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        torch.set_rng_state(checkpoint['rng_state'])
+        random.setstate(checkpoint['random_state'])
+        if torch.cuda.is_available() and checkpoint.get('cuda_rng_state'): torch.cuda.set_rng_state_all(checkpoint['cuda_rng_state'])
+        history, global_step, start_epoch = checkpoint['history'], checkpoint['global_step'], checkpoint['epoch']
+    domains = ['joint'] if args.phase == 'fusion' else ['diet', 'exercise'] if args.domain == 'both' else [args.domain]
+    loaders = {}
+    for domain in domains:
+        rows = [s for s in groups['train'] if s['joint']] if domain == 'joint' else [s for s in groups['train'] if s['mode'] == domain]
+        if not rows: raise ValueError(f'No {domain} training records')
+        loaders[domain] = DataLoader(rows, batch_size=args.batch_size, shuffle=True, collate_fn=lambda rows: collate(rows, vocabulary))
+    local_steps = 0
+    for epoch in range(start_epoch, start_epoch+args.epochs):
+        model.train(); iterators = {d:iter(loader) for d,loader in loaders.items()}
+        totals, counts = 0., 0
+        for _ in range(max(map(len, loaders.values()))):
+            for domain, loader in loaders.items():
+                try: batch = next(iterators[domain])
+                except StopIteration: iterators[domain] = iter(loader); batch = next(iterators[domain])
+                batch = device_batch(batch, args.device)
+                optimizer.zero_grad(set_to_none=True)
+                predicted = model(batch, domain)['predicted_cgm']
+                valid = batch['target_mask']
+                loss = ((predicted[valid]-batch['target'][valid])/model.glucose_scale).square().mean()
+                if not torch.isfinite(loss): raise FloatingPointError('Nonfinite training loss')
+                loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
+                global_step += 1; local_steps += 1; totals += float(loss.detach()); counts += 1
+                if domain != 'joint': trained_domains.add(domain)
+                if args.max_steps and local_steps >= args.max_steps: break
+            if args.max_steps and local_steps >= args.max_steps: break
+        metrics, _ = evaluate(model, groups['validation'], vocabulary, args.device, args.batch_size, 'joint' if args.phase=='fusion' else None)
+        entry = dict(epoch=epoch+1, step=global_step, loss=totals/counts, validation=metrics)
         history.append(entry); print(json.dumps(entry))
-    checkpoint = {'architecture_version': 2, 'phase': args.phase, 'stage': args.stage,
-                  'participant_id': args.participant_id,
-                  'model_state_dict': model.state_dict(), 'model_config': model_config,
-                  'config': config, 'loss_weights': asdict(weights), 'history': history}
-    torch.save(checkpoint, output / 'checkpoint.pt')
-    (output / 'history.json').write_text(json.dumps(history, indent=2), encoding='utf-8')
-    if args.export_inference:
-        inference_config = dict(model_config, include_training_heads=False)
-        torch.save({'architecture_version': 2, 'model_config': inference_config,
-                    'phase': args.phase, 'stage': args.stage, 'participant_id': args.participant_id,
-                    'model_state_dict': model.inference_state_dict()},
-                   output / 'inference.pt')
-    return checkpoint
+        state = dict(architecture_version=3, schema_version=1, phase=args.phase, trained_domains=sorted(trained_domains), model_config=model_config, llm_actions=model.llm_actions, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), splits=splits, vocabulary=vocabulary, epoch=epoch+1, global_step=global_step, history=history, rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None, parent=checkpoint_path, data=str(Path(args.data).resolve()), config=config)
+        torch.save(state, output/'checkpoint.pt')
+        (output/'history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')
+        if args.max_steps and local_steps >= args.max_steps: break
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()

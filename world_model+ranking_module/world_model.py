@@ -1,0 +1,147 @@
+import math
+import os
+import torch
+from torch import nn
+from model import CGMTransformerEncoder, transformer_encoder, causal_mask
+
+
+def llm_actions_enabled():
+    value = os.environ.get('XLIFE_USE_LLM_ACTION_ENCODERS', '0').strip().lower()
+    if value not in {'', '0', 'false', 'no', 'off', '1', 'true', 'yes', 'on'}: raise ValueError('Invalid XLIFE_USE_LLM_ACTION_ENCODERS')
+    return value in {'1', 'true', 'yes', 'on'}
+
+
+class NumericEncoder(nn.Module):
+    def __init__(self, size, dimension):
+        super().__init__()
+        self.register_buffer('mean', torch.zeros(size))
+        self.register_buffer('scale', torch.ones(size))
+        self.network = nn.Sequential(nn.Linear(size * 2, dimension), nn.GELU(), nn.Linear(dimension, dimension))
+
+    def fit(self, values):
+        valid = torch.isfinite(values)
+        count = valid.sum(0).clamp_min(1)
+        mean = torch.where(valid, values, 0).sum(0) / count
+        scale = (torch.where(valid, (values-mean).square(), 0).sum(0)/count).sqrt().clamp_min(1e-3)
+        self.mean.copy_(mean); self.scale.copy_(scale)
+
+    def forward(self, values):
+        valid = torch.isfinite(values)
+        normalized = torch.where(valid, (values-self.mean)/self.scale, 0)
+        return self.network(torch.cat([normalized, valid.to(values.dtype)], -1))
+
+
+class Transition(nn.Module):
+    def __init__(self, dimension, basis_dim, heads, layers):
+        super().__init__()
+        self.conditioning = nn.Sequential(nn.Linear(2*dimension, dimension), nn.GELU(), nn.Linear(dimension, dimension))
+        self.basis = nn.Parameter(torch.empty(basis_dim, dimension))
+        nn.init.orthogonal_(self.basis)
+        self.dynamics = nn.Sequential(nn.Linear(basis_dim, dimension), nn.LayerNorm(dimension), nn.GELU(), nn.Linear(dimension, dimension))
+        self.trajectory = transformer_encoder(dimension, heads, layers, 0.)
+        self.decoder = nn.Linear(dimension, 1)
+
+    def increment(self, state): return self.dynamics(state @ self.basis.T)
+
+    def readout(self, states):
+        q = self.trajectory(states, mask=causal_mask(states.size(1), states.device))
+        return q, self.decoder(q).squeeze(-1)
+
+
+class MetabolicWorldModel(nn.Module):
+    """Residual diet, exercise and gated joint dynamics."""
+    def __init__(self, dimension=128, basis_dim=128, heads=4, layers=2, patch_size=6, diet_model_path=None, exercise_model_path=None):
+        super().__init__()
+        self.dimension, self.llm_actions = dimension, llm_actions_enabled()
+        self.diet_encoder, self.exercise_encoder = NumericEncoder(6, dimension), NumericEncoder(3, dimension)
+        self.metadata_encoder = NumericEncoder(84, dimension)
+        self.type_embedding = nn.Embedding(128, dimension)
+        self.cgm_encoder = CGMTransformerEncoder(d_model=dimension, nhead=heads, num_layers=layers, dropout=0., patch_size=patch_size)
+        self.state_projection = nn.Sequential(nn.Linear(3*dimension+2, dimension), nn.GELU(), nn.Linear(dimension, dimension))
+        self.diet = Transition(dimension, basis_dim, heads, layers)
+        self.exercise = Transition(dimension, basis_dim, heads, layers)
+        self.fusion = Transition(2*dimension, 2*basis_dim, heads, layers)
+        self.gate = nn.Linear(2*basis_dim, 3)
+        self.register_buffer('glucose_mean', torch.tensor(0.))
+        self.register_buffer('glucose_scale', torch.tensor(1.))
+        if self.llm_actions:
+            if not diet_model_path or not exercise_model_path: raise ValueError('Both domain VLM paths are required')
+            from model import ImageEncoder
+            self.diet_vlm = ImageEncoder(hidden_dim=dimension, model_path=diet_model_path)
+            self.exercise_vlm = ImageEncoder(hidden_dim=dimension, model_path=exercise_model_path)
+            self.diet_vlm.requires_grad_(False); self.exercise_vlm.requires_grad_(False)
+
+    def fit(self, samples):
+        for name in ('diet', 'exercise', 'metadata'):
+            getattr(self, name+'_encoder').fit(torch.stack([s[name] for s in samples]))
+        observed = torch.cat([s['history'][s['history_mask']] for s in samples])
+        self.glucose_mean.copy_(observed.mean()); self.glucose_scale.copy_(observed.std(unbiased=False).clamp_min(1e-3))
+
+    def time_encoding(self, minutes, dimension):
+        frequencies = torch.exp(torch.arange(0, dimension, 2, device=minutes.device)*(-math.log(10000.)/dimension))
+        phase = minutes[:, None]/5 * frequencies
+        return torch.stack([phase.sin(), phase.cos()], -1).flatten(-2)[:, :dimension]
+
+    def initial_states(self, batch):
+        mask, history = batch['history_mask'], batch['history']
+        values = (history-self.glucose_mean)/self.glucose_scale
+        encoded = self.cgm_encoder(values, mask)
+        weights = self.cgm_encoder.patch_weights(values, mask).unsqueeze(-1)
+        pooled = (encoded*weights).sum(1)/weights.sum(1).clamp_min(1)
+        positions = torch.arange(history.size(1), device=history.device).expand_as(history)
+        last_index = positions.masked_fill(~mask, -1).max(1).values
+        if (last_index < 0).any(): raise ValueError('History requires at least one measured value')
+        last = history.gather(1, last_index[:, None]).squeeze(1)
+        recent = encoded[torch.arange(len(history), device=history.device), last_index//self.cgm_encoder.patch_size]
+        state = self.state_projection(torch.cat([pooled, recent, self.metadata_encoder(batch['metadata']), ((last-self.glucose_mean)/self.glucose_scale)[:, None], (35-last_index)[:, None]/36], -1))
+        if self.llm_actions:
+            diet = self.diet_vlm([None]*len(history), batch['diet_text'])
+            exercise = self.exercise_vlm([None]*len(history), batch['exercise_text'])
+        else:
+            diet = self.diet_encoder(batch['diet'])
+            exercise = self.exercise_encoder(batch['exercise']) + self.type_embedding(batch['type_id'])
+        diet = diet + self.time_encoding(batch['onset'][:, 0], self.dimension)
+        exercise = exercise + self.time_encoding(batch['onset'][:, 1], self.dimension)
+        return self.diet.conditioning(torch.cat([state, diet], -1)), self.exercise.conditioning(torch.cat([state, exercise], -1)), last
+
+    def initialize_fusion(self):
+        with torch.no_grad(): self.fusion.basis.copy_(torch.block_diag(self.diet.basis, self.exercise.basis))
+
+    def configure_phase(self, phase):
+        self.requires_grad_(False)
+        names = ('diet_encoder', 'exercise_encoder', 'type_embedding', 'metadata_encoder', 'cgm_encoder', 'state_projection', 'diet', 'exercise') if phase == 'single' else ('fusion', 'gate')
+        for name in names: getattr(self, name).requires_grad_(True)
+        if phase == 'fusion':
+            self.diet.conditioning.requires_grad_(True); self.exercise.conditioning.requires_grad_(True)
+        if self.llm_actions:
+            self.diet_vlm.requires_grad_(False); self.exercise_vlm.requires_grad_(False)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.llm_actions: self.diet_vlm.eval(); self.exercise_vlm.eval()
+        return self
+
+    def forward(self, batch, mode, horizon=36):
+        if mode not in {'diet', 'exercise', 'joint'} or horizon < 1: raise ValueError('Invalid mode or horizon')
+        diet, exercise, last = self.initial_states(batch)
+        state = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
+        states, gates = [], []
+        for _ in range(horizon):
+            if mode == 'joint':
+                d, e = state.split(self.dimension, -1)
+                weights = torch.sigmoid(self.gate(state @ self.fusion.basis.T))
+                dm, em = self.diet.increment(d), self.exercise.increment(e)
+                state = state + torch.cat([weights[:, :1]*dm, weights[:, 1:2]*em], -1) + weights[:, 2:3]*self.fusion.increment(state)
+                gates.append(weights)
+            else: state = state + getattr(self, mode).increment(state)
+            states.append(state)
+        states = torch.stack(states, 1)
+        q, glucose = (self.fusion if mode == 'joint' else getattr(self, mode)).readout(states)
+        return dict(predicted_cgm=last[:, None]+glucose*self.glucose_scale, trajectory=q, states=states, gates=torch.stack(gates, 1) if gates else None)
+
+    @torch.no_grad()
+    def simulate(self, batch, mode):
+        was_training = self.training
+        self.eval()
+        try: return self(batch, mode)
+        finally: self.train(was_training)
