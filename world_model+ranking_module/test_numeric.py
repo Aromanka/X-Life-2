@@ -11,6 +11,7 @@ from test_metadata import encoded_metadata
 from dataset import cgm_window
 from world_model import MetabolicWorldModel, llm_actions_enabled
 from train import evaluate, split_samples, temporal_overlap, curve_metrics, main
+from runtime_schema import supervision_values
 
 
 class NumericTests(unittest.TestCase):
@@ -103,6 +104,7 @@ class NumericTests(unittest.TestCase):
         self.assertEqual(metrics['invalid_correlations'],1)
 
     def test_selection_and_training_control(self):
+        schema = json.loads((Path(__file__).resolve().parents[2]/'extra_code/schema.json').read_text(encoding='utf-8'))
         class Rows:
             skipped = 0
             def __len__(self): return len(self.samples)
@@ -110,19 +112,20 @@ class NumericTests(unittest.TestCase):
         for i,hour in enumerate((8,10,12,14)):
             row = {key:deepcopy(value[0]) for key,value in self.batch.items()}
             row.update(subject_id='a',origin=f'2025-01-01T{hour:02}:00:00',mode='diet' if i%2==0 else 'exercise',joint=True,exercise_type='',diet_text='',exercise_text='',target=torch.ones(36)*6,target_mask=torch.ones(36,dtype=torch.bool))
+            row['supervision'] = supervision_values(schema, {'sample':row})
             dataset.samples.append(row)
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory)/'config.json'
             config.write_text(json.dumps({'model':{'dimension':16,'basis_dim':8,'heads':2,'layers':1}}))
             args = ['--data','unused','--config',str(config),'--split-strategy','within_subject','--epochs','20','--batch-size','1','--device','cpu','--output',directory]
-            with patch('train.XLifeCleanedDataset',return_value=dataset),patch('train.evaluate',return_value=({'mae':1.},[])),patch('builtins.print'):
+            with patch('train.load_schema',return_value=schema),patch('train.XLifeCleanedDataset',return_value=dataset),patch('train.evaluate',return_value=({'mae':1.},[])),patch('builtins.print'):
                 main(args)
             best = torch.load(Path(directory)/'best.pt',weights_only=False)
             last = torch.load(Path(directory)/'checkpoint.pt',weights_only=False)
             self.assertEqual(best['epoch'],1); self.assertEqual(last['epoch'],11)
             self.assertEqual(last['bad_epochs'],10)
             self.assertLess(last['optimizer']['param_groups'][0]['lr'],.0001)
-            with patch('train.XLifeCleanedDataset',return_value=dataset),patch('train.evaluate',return_value=({'mae':.8},[])),patch('builtins.print'):
+            with patch('train.load_schema',return_value=schema),patch('train.XLifeCleanedDataset',return_value=dataset),patch('train.evaluate',return_value=({'mae':.8},[])),patch('builtins.print'):
                 main(args+['--resume',str(Path(directory)/'checkpoint.pt'),'--epochs','1'])
             resumed = torch.load(Path(directory)/'checkpoint.pt',weights_only=False)
             self.assertEqual(resumed['epoch'],12); self.assertEqual(resumed['bad_epochs'],0)

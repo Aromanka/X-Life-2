@@ -58,3 +58,7 @@ CBG/夜间仅实现显式时间锚点、单位和观测来源的任务校验，�
 旧 v2 agents、trainer 和模型配置迁至同级 extra_code/legacy_xlife 保存，不再进入默认导入路径。v2 checkpoint 不兼容。真实大模型、图谱完整性、五次全量研究实验和论文规模动作编码器训练须另行验证。
 
 Ranking 版本已更新为 2。旧 single/fusion 产物可用于初始化；旧有界分数对齐产物需要从 fusion 重新训练排序头，不能继续原对齐训练。
+## 服务端监督与检索 schema
+
+辅助监督与个体化知识检索统一从服务的 `POST /v1/schema` 读取策略。服务通过 `--schema` 选择 JSON 文件；字段路径、目标形状、损失权重和检索查询来源均在服务端设定，见 [RUNTIME_SCHEMA.md](docs/RUNTIME_SCHEMA.md)。
+

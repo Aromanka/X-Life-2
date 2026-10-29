@@ -52,11 +52,17 @@ class Transition(nn.Module):
 class MetabolicWorldModel(nn.Module):
     """Residual diet, exercise and gated joint dynamics."""
     def __init__(self, dimension=128, basis_dim=128, heads=4, layers=2, patch_size=6, diet_model_path=None, exercise_model_path=None,
-                 action_backend_id=None, state_pooling="both", gap_feature=True, readout="direct"):
+                 action_backend_id=None, state_pooling="both", gap_feature=True, readout="direct", schema=None):
         super().__init__()
         if diet_model_path or exercise_model_path:
             raise ValueError('Local language-model paths are retired; configure the external HTTP role service')
         self.dimension, self.llm_actions = dimension, llm_actions_enabled()
+        self.schema = schema
+        self.supervision_heads = nn.ModuleDict()
+        for spec in (schema or {}).get('supervision', []):
+            if spec.get('prediction'): continue
+            shape = spec['shape'][1:] if spec['readout'] == 'sequence' else spec['shape']
+            self.supervision_heads[spec['name']] = nn.ModuleDict({mode:nn.Linear(dimension * (2 if mode == 'joint' else 1), math.prod(shape)) for mode in ('diet','exercise','joint')})
         self.diet_encoder, self.exercise_encoder = NumericEncoder(6, dimension), NumericEncoder(3, dimension)
         self.metadata_encoder = SemanticMetadataEncoder(dimension)
         self.type_embedding = nn.Embedding(128, dimension)
@@ -129,6 +135,9 @@ class MetabolicWorldModel(nn.Module):
         names = ('diet_encoder', 'exercise_encoder', 'type_embedding', 'metadata_encoder', 'cgm_encoder', 'state_projection', 'diet', 'exercise') if phase == 'single' else ('fusion', 'gate') if phase == 'fusion' else ('ranking_head',)
         for name in names:
             for parameter in getattr(self, name).parameters(): parameter.requires_grad = True
+        if phase in ('single', 'fusion'):
+            for heads in self.supervision_heads.values():
+                for mode in (('joint',) if phase == 'fusion' else ('diet','exercise')): heads[mode].requires_grad_(True)
         if phase == 'fusion':
             self.diet.conditioning.requires_grad_(True); self.exercise.conditioning.requires_grad_(True)
         if self.llm_actions and phase == 'single':

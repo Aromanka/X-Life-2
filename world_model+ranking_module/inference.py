@@ -17,6 +17,7 @@ from knowledge import KnowledgeGraph
 from safety import assess
 from world_model import MetabolicWorldModel, llm_actions_enabled
 from dataset_metadata import prepare_metadata
+from runtime_schema import load_schema, retrieve
 
 
 def finite_json(value):
@@ -75,8 +76,17 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
         method_status='pending')
     output['test_only'] |= any(p.get('test_backend',False) for p in graph.provenance)
     output['test_only'] |= bool(checkpoint.get('test_backend',False))
-    terms = [str(x) for x in requirement.values() if isinstance(x,str)]
-    generation_knowledge = graph.retrieve(terms, 'generation')
+    sources = dict(context=context, requirement=requirement, constraints=constraints)
+    try:
+        schema = load_schema(backend)
+        generation_knowledge, provenance = retrieve(graph, schema['retrieval']['generation'], sources, backend)
+    except Exception as error:
+        output['method_status'] = 'retrieval_failed'
+        output['failures'].append(dict(stage='retrieval', reason=str(error)))
+        return output
+    output['retrieval_schema'] = schema['retrieval']
+    output['retrieval_provenance'] = list(provenance)
+    output['test_only'] |= any(p['test_backend'] for p in provenance)
     output['generation_knowledge']=generation_knowledge
     if candidates is None:
         try:
@@ -144,9 +154,10 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
     for row in sorted(output['candidates'],key=lambda r:ranking_logits.get(r['id'],float('-inf')),reverse=True):
         if row['status'] != 'simulated': continue
         raw = row['candidate']
-        safety_terms = list(raw.get('ingredients',[])) + [raw.get('exercise_type','')] + constraints.get('conditions',[])
-        row['safety_knowledge']=graph.retrieve(safety_terms,'safety')
         try:
+            row['safety_knowledge'], provenance = retrieve(graph, schema['retrieval']['safety'], dict(sources, candidate=raw, simulation=row['simulation']), backend)
+            output['retrieval_provenance'].extend(provenance)
+            output['test_only'] |= any(p['test_backend'] for p in provenance)
             row['assessment'] = assess(raw,context,row['simulation'],constraints,row['safety_knowledge'],backend)
         except Exception as error:
             row.update(status='safety_failed',reason=str(error))

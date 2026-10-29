@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from dataset import XLifeCleanedDataset
 from train import collate,device_batch,curve_metrics,physiological_loss
 from world_model import MetabolicWorldModel
+from runtime_schema import load_schema
 from experiments.baselines import DLinear,persistence,linear_history
 from experiments.tasks import task_window
 
@@ -59,7 +60,8 @@ def run(args):
         (Path(args.output)/'task_validation.json').write_text(json.dumps(output),encoding='utf-8')
         print(json.dumps(output));return
     if not args.data: raise ValueError('--data or --task-data required')
-    dataset=XLifeCleanedDataset(args.data,args.max_subjects,args.max_samples)
+    schema=load_schema()
+    dataset=XLifeCleanedDataset(args.data,args.max_subjects,args.max_samples,schema=schema)
     data_identity={'path':str(Path(args.data).resolve()),'sha256':hashlib.sha256(Path(args.data).read_bytes()).hexdigest()}
     config=json.loads(Path(args.config).read_text(encoding='utf-8')) if args.config else {}
     runs=[]
@@ -71,7 +73,7 @@ def run(args):
             if kind=='dlinear':
                 model=DLinear(action_correction=args.action_correction);model.fit_statistics(groups['train'])
             elif kind=='world':
-                model=MetabolicWorldModel(**config.get('model',{}));model.fit(groups['train']);model.configure_phase('single')
+                model=MetabolicWorldModel(**dict(config.get('model',{}),schema=schema));model.fit(groups['train']);model.configure_phase('single')
             else: model=None
             vocabulary={s:i+1 for i,s in enumerate(sorted({r['exercise_type'] for r in groups['train']}))}
             if len(vocabulary)>127: raise ValueError('Exercise vocabulary exceeds model capacity')
@@ -115,11 +117,12 @@ def run(args):
             result=dict(seed=seed,model=kind,action_correction=args.action_correction,protocol='participant80_unseen20_purged_seen_holdout',
                 adaptation='none_zero_shot',splits=splits,counts={k:len(v) for k,v in groups.items()},metrics=reports,
                 elapsed_seconds=time.perf_counter()-start,peak_cuda_bytes=torch.cuda.max_memory_allocated() if args.device.startswith('cuda') else 0,
-                model_config=config.get('model',{}),epochs=args.epochs if model else 0)
+                model_config=dict(config.get('model',{}),schema=schema) if kind=='world' else config.get('model',{}),epochs=args.epochs if model else 0)
             result.update(data=data_identity,training_settings={'batch_size':args.batch_size,'learning_rate':args.learning_rate},
                 event_splits={k:[{'subject_id':r['subject_id'],'origin':r['origin'],'mode':r['mode']} for r in v] for k,v in groups.items()},
                 test_only=bool(args.max_subjects or args.max_samples or (kind=='world' and model.llm_actions and
                                (model.diet_vlm.test_backend or model.exercise_vlm.test_backend))))
+            if kind=='world': result['test_only'] |= model.metadata_encoder.test_backend or any(v['test_backend'] for row in dataset.samples for v in row.get('supervision',{}).values())
             if args.adapt_epochs and kind=='world':
                 adaptation_start=time.perf_counter()
                 result['participant_fine_tuning']=adapt_unseen(model,groups['unseen'],vocabulary,args)

@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import XLifeCleanedDataset, SampleNumericDataset
 from world_model import MetabolicWorldModel, llm_actions_enabled
+from runtime_schema import load_schema, supervision_loss
 
 
 def collate(rows, vocabulary):
@@ -15,6 +16,7 @@ def collate(rows, vocabulary):
     batch['type_id'] = torch.tensor([vocabulary.get(row['exercise_type'], 0) for row in rows])
     for key in ('diet_text', 'exercise_text', 'subject_id', 'origin'): batch[key] = [row[key] for row in rows]
     batch['diet_images'] = [row.get('diet_images', []) for row in rows]
+    if 'supervision' in rows[0]: batch['supervision'] = [row['supervision'] for row in rows]
     return batch
 
 
@@ -22,13 +24,8 @@ def device_batch(batch, device): return {key: value.to(device) if isinstance(val
 
 
 def physiological_loss(model, batch, mode):
-    """Shared factual objective for the trainer and controlled experiments."""
-    predicted = model(batch, mode, horizon=batch['target'].size(1))['predicted_cgm']
-    valid = batch['target_mask']
-    if not valid.any(): raise ValueError('No measured physiological labels')
-    loss = ((predicted[valid]-batch['target'][valid])/model.glucose_scale).square().mean()
-    if not torch.isfinite(loss): raise FloatingPointError('Nonfinite training loss')
-    return loss
+    output = model(batch, mode, horizon=batch['target'].size(1))
+    return supervision_loss(model, batch['supervision'], output, mode)
 
 
 def split_samples(samples, strategy, seed, splits=None):
@@ -142,7 +139,10 @@ def main(argv=None):
         else: run_alignment(args, model, checkpoint, config if args.config else checkpoint.get('config', {}), output)
         return
     if (args.predict_only or args.phase == 'fusion') and not checkpoint: raise ValueError('A checkpoint is required')
-    dataset = {'xlife_cleaned': XLifeCleanedDataset, 'sample': SampleNumericDataset}[args.dataset](args.data, args.max_subjects, args.max_samples)
+    schema = load_schema()
+    if checkpoint and (model_config.get('schema') or {}).get('supervision') != schema['supervision']: raise ValueError('Server supervision schema differs from checkpoint; start new training')
+    model_config = dict(model_config, schema=schema)
+    dataset = {'xlife_cleaned': XLifeCleanedDataset, 'sample': SampleNumericDataset}[args.dataset](args.data, args.max_subjects, args.max_samples, schema=schema)
     if not dataset.samples: raise ValueError('No usable records')
     strategy = args.split_strategy or (checkpoint.get('split_strategy','subject') if checkpoint else 'subject')
     if checkpoint and strategy != checkpoint.get('split_strategy','subject'): raise ValueError('Checkpoint split strategy mismatch; start a new experiment')
@@ -217,6 +217,7 @@ def main(argv=None):
         state = dict(architecture_version=3, schema_version=1, phase=args.phase, trained_domains=sorted(trained_domains), model_config=model_config, llm_actions=model.llm_actions, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), splits=splits, vocabulary=vocabulary, epoch=epoch+1, global_step=global_step, history=history, rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None, parent=checkpoint_path, data=str(Path(args.data).resolve()), config=config)
         state.update(ranking_version=2,split_strategy=strategy,scheduler=scheduler.state_dict(),best_mae=best_mae,bad_epochs=bad_epochs)
         state['test_backend'] = model.metadata_encoder.test_backend or bool(model.llm_actions and (model.diet_vlm.test_backend or model.exercise_vlm.test_backend))
+        state['test_backend'] |= any(v['test_backend'] for row in dataset.samples for v in row.get('supervision', {}).values())
         torch.save(state, output/'checkpoint.pt')
         if improved: torch.save(state,output/'best.pt')
         (output/'history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')

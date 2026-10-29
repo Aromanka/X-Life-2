@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from datetime import datetime
 from pathlib import Path
 from dataset_metadata import prepare_metadata
+from runtime_schema import supervision_values
 
 
 def numeric_value(value):
@@ -36,9 +37,10 @@ def cgm_window(points, origin, future=False):
 
 class XLifeCleanedDataset(Dataset):
     """Numeric action-response records."""
-    def __init__(self, path, max_subjects=None, max_samples=None):
+    def __init__(self, path, max_subjects=None, max_samples=None, schema=None):
         with open(path, encoding='utf-8') as handle: patients = json.load(handle)
         self.root = Path(path).resolve().parent
+        self.schema = schema
         self.samples, self.skipped = [], 0
         for patient in patients[:max_subjects]:
             start = len(self.samples)
@@ -85,6 +87,8 @@ class XLifeCleanedDataset(Dataset):
         self.samples[-1]['diet_images'] = [str((self.root/p).resolve()) for p in images]
         self.samples[-1]['diet_text'] = json.dumps(details, ensure_ascii=False) if details else ''
         self.samples[-1]['exercise_text'] = json.dumps(exercise, ensure_ascii=False) if exercise else ''
+        if self.schema is not None:
+            self.samples[-1]['supervision'] = supervision_values(self.schema, dict(patient=patient, row=row, sample=self.samples[-1]))
 
     def __len__(self): return len(self.samples)
     def __getitem__(self, index): return self.samples[index]
