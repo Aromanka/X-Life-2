@@ -8,10 +8,11 @@ from pathlib import Path
 import random
 import time
 import torch
+from collections import Counter
 from alignment import candidate, batch_candidates
 from backends.http import HTTPBackend
 from dataset import XLifeCleanedDataset
-from generation import validate_candidate
+from generation import validate_candidate,normalize_candidate
 from knowledge import KnowledgeGraph
 from safety import assess
 from world_model import MetabolicWorldModel, llm_actions_enabled
@@ -47,8 +48,10 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
         raise ValueError('Only masked physiological context may enter recommendation')
     if count<1 or top_k<1 or batch_size<1: raise ValueError('Positive counts required')
     constraints = constraints or {}
-    requirement = requirement or dict(mode=mode, energy_kcal=random.Random(seed).randint(350,650),
-        duration_min=random.Random(seed+1).randint(10,30), preference_seed=seed)
+    if requirement is None:
+        requirement=dict(mode=mode,preference_seed=seed,onset=[0,-15] if mode=='joint' else [0,0])
+        if mode in ('diet','joint'): requirement['energy_kcal']=random.Random(seed).randint(350,650)
+        if mode in ('exercise','joint'): requirement['duration_min']=random.Random(seed+1).randint(10,30)
     context = deepcopy(context)
     identity = hashlib.sha256(json.dumps(context,sort_keys=True,allow_nan=False).encode()).hexdigest()
     output = dict(schema_version=1, context=context, context_hash=identity, requirement=requirement,
@@ -80,10 +83,14 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
         output['candidates'].append(row)
         try:
             if extract_actions:
+                row['generation_candidate']=deepcopy(raw)
                 response = backend.call('action/explicit', {'action':raw})
                 raw = response['result']['action']
                 row['candidate'], row['extraction_provenance'] = raw, response['provenance']
                 output['test_only'] |= response['provenance']['test_backend']
+            row['raw_candidate']=deepcopy(raw)
+            raw=normalize_candidate(raw)
+            row['candidate']=raw
             action = validate_candidate(deepcopy(raw))
             if action['mode'] == 'joint' and checkpoint['phase'] not in ('fusion','professional','physiological'):
                 raise ValueError('Joint simulation requires a fusion-trained checkpoint')
@@ -169,8 +176,15 @@ def main(argv=None):
                   elapsed_seconds=time.perf_counter()-started)
     path=Path(args.output);path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+    statuses=Counter(row['status'] for row in result['candidates'])
+    reasons=Counter()
+    for row in result['candidates']:
+        assessment=row.get('assessment') or {}
+        semantic=assessment.get('semantic') or {}
+        for reason in [row.get('reason'),assessment.get('error')]+assessment.get('hard_vetoes',[])+semantic.get('reasons',[]):
+            if reason: reasons[str(reason)]+=1
     print(json.dumps(dict(output=str(path),candidates=len(result['candidates']),safe_top=len(result['top_plans']),
-                         test_only=result['test_only'],failures=result['failures'])))
+                         test_only=result['test_only'],status_counts=dict(statuses),failure_reasons=dict(reasons),failures=result['failures'])))
 
 
 if __name__=='__main__': main()

@@ -10,7 +10,7 @@ class BackendError(RuntimeError):
 
 class HTTPBackend:
     """Role-based POST contract; prompts and model selection belong to the server."""
-    def __init__(self, url=None, timeout=180):
+    def __init__(self, url=None, timeout=600):
         self.url = (url or os.environ.get('XLIFE_LLM_URL', 'http://127.0.0.1:8765')).rstrip('/')
         self.timeout = timeout
 

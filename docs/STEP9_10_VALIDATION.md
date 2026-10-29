@@ -24,8 +24,8 @@ Interpreter: E:/code/Env/envs/ml_env/python.exe. Role service: real localhost HT
 
 ## Pending external/data-dependent work
 
-- Actual supplied upstream API and server-local test model generation/review; real latent weights and artifact identity; production graph import/index content and knowledge quality. Use exp_1029_v2.sh server-api or server-local, then inference.
+- Actual supplied upstream API and server-local test model generation/review; real latent weights and artifact identity; production graph import/index content and knowledge quality. Start one of the Python server commands documented in exp_1029_v2.sh in terminal 1, then run bash exp_1029_v2.sh in terminal 2.
 - Ranking training on the user's server. Random ranking is an explicit smoke option only; use learned with the correct aligned checkpoint later.
-- Full five-seed experiments and single-factor comparisons. Commands are in exp_1029_v2.sh experiments and ablations. Local smoke results do not satisfy the full research protocol.
+- Full five-seed experiments and single-factor comparisons. Optional plain Python commands are commented in exp_1029_v2.sh; run them individually from X-Life-2. Local smoke results do not satisfy the full research protocol.
 - Verified CBG/night task definitions, bedtime/wake labels and task-specific training. Current implementation validates supplied definitions and does not claim overnight prediction capability.
 - Full-parameter domain language-model SFT, additional sensor studies, RevIN/TCN/self-supervision and final scientific conclusions remain unverified/optional.
