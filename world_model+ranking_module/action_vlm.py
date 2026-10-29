@@ -1,10 +1,11 @@
 import json
-import math
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 import torch
 from torch import nn
 from torch.nn import functional as F
+from action_factor_format import parse_action_factors
 
 
 class ActionVLM(nn.Module):
@@ -30,6 +31,8 @@ class ActionVLM(nn.Module):
         if not text.strip() and not images: raise ValueError('An action needs text or meal images')
         instruction = ('Describe food items, ingredients, preparation, portions and nutrition.' if self.domain == 'diet'
                        else 'Describe exercise type, intensity in MET, duration and timing relative to meals.')
+        if annotations is None:
+            instruction = 'Extract physiological action factors. Follow the requested JSON schema exactly.'
         content = [{'type':'image', 'path':str(Path(p).resolve())} for p in images]
         content.append({'type':'text', 'text':instruction + '\n' + text})
         messages = [{'role':'user', 'content':content}]
@@ -54,18 +57,7 @@ class ActionVLM(nn.Module):
                              '(requirements.txt pins transformers==4.57.1).')
 
     def parse_factors(self, answer):
-        if answer.startswith('```'):
-            answer = answer.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-        result = json.loads(answer)
-        # Pretrained VLMs may emit the requested vector without its object wrapper.
-        # Both forms preserve the exact same factor order, count and validation.
-        factors = result.get('factors') if isinstance(result, dict) else result
-        if not isinstance(factors, list) or len(factors) != (6 if self.domain == 'diet' else 3):
-            raise ValueError('Expected action JSON {"factors":[numbers]} or a numeric array '
-                             f'with {6 if self.domain == "diet" else 3} factors; got {type(result).__name__}')
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 for v in factors):
-            raise ValueError('Generated action factors must be finite nonnegative numbers')
-        return factors
+        return parse_action_factors(answer, self.domain)
 
     def forward(self, inputs, pooling_mask, factors=None):
         output = self.vlm(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
@@ -88,10 +80,32 @@ class ActionVLM(nn.Module):
     @torch.inference_mode()
     def generate_factors(self, text, images=()):
         fields = 'carbohydrate_g, protein_g, fat_g, fiber_g, mass_g, energy_kcal' if self.domain == 'diet' else 'duration_min, energy_kcal, intensity_MET'
-        text += '\nReturn only JSON {"factors":[numbers]} in this order: ' + fields + '. Use finite nonnegative numbers. Preserve supplied quantities; estimate unspecified quantities from the action. No prose.'
-        inputs, _ = self.inputs(text, images)
-        inputs = {k:v.to(self.vlm.device) for k,v in inputs.items()}
-        generated = self.vlm.generate(**inputs, max_new_tokens=256, do_sample=False)
-        answer = self.processor.batch_decode(generated[:, inputs['input_ids'].size(1):], skip_special_tokens=True)[0].strip()
-        factors = self.parse_factors(answer)
-        return torch.tensor(factors, device=self.vlm.device, dtype=torch.float32)
+        count = 6 if self.domain == 'diet' else 3
+        request = (text + '\nReturn ONLY one JSON object with key "factors" containing exactly '
+                   + str(count) + ' numeric values in this order: ' + fields
+                   + '. Use finite nonnegative numbers, not strings or null. Preserve supplied quantities; '
+                   'estimate unspecified quantities from the action. Output totals for the entire action. '
+                   'Multiple images may show the same meal; do not double count. '
+                   'No per-food lists, alternative answers, markdown or prose.')
+        errors, answer = [], ''
+        for attempt in range(3):
+            correction = '' if not errors else ('\nYour previous response was invalid: ' + errors[-1]
+                + '\nPrevious response:\n' + answer[:2000]
+                + f'\nCorrect the format and provide ALL {count} factors, including missing estimates. Return one aggregate vector.')
+            inputs, _ = self.inputs(request + correction, images)
+            inputs = {k:v.to(self.vlm.device) for k,v in inputs.items()}
+            generated = self.vlm.generate(**inputs, max_new_tokens=512, do_sample=False)
+            answer = self.processor.batch_decode(generated[:, inputs['input_ids'].size(1):], skip_special_tokens=True)[0].strip()
+            try:
+                factors = self.parse_factors(answer)
+                vector = torch.tensor(factors, device=self.vlm.device, dtype=torch.float32)
+                if not torch.isfinite(vector).all():
+                    raise ValueError('Action factors exceed float32 range')
+                self.factor_generation_audit = dict(attempts=attempt+1, validation_errors=errors)
+                return vector
+            except ValueError as error:
+                errors.append(str(error))
+                logging.getLogger(__name__).warning('%s action format attempt %d/3: %s; response=%r',
+                    self.domain, attempt+1, error, answer[:1000])
+        raise ValueError(f'{self.domain} action factors invalid after 3 attempts: {errors[-1]}; '
+                         f'model_response={answer[:1000]!r}')

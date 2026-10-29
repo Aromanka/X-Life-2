@@ -1,4 +1,5 @@
 import os
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -54,9 +55,10 @@ class ActionEncoderTests(unittest.TestCase):
         model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
         model.domain = 'diet'
         for answer in ('{"factors":[45,20,12,6,350,400]}', '[45,20,12,6,350,400]',
+                       '[{"factors":[45,20,12,6,350,400]}]', '[[45,20,12,6,350,400]]',
                        '```json\n[45,20,12,6,350,400]\n```'):
             self.assertEqual(model.parse_factors(answer), [45,20,12,6,350,400])
-        for answer in ('[{"factors":[45,20,12,6,350,400]}]', '{}', 'null',
+        for answer in ('{}', 'null',
                        '[45,20,12,6,350]', '[45,20,12,6,350,null]',
                        '[45,20,12,6,350,true]', '[45,20,12,6,350,-1]',
                        '[45,20,12,6,350,NaN]', '[45,20,12,6,350,Infinity]'):
@@ -64,6 +66,50 @@ class ActionEncoderTests(unittest.TestCase):
                 model.parse_factors(answer)
         model.domain = 'exercise'
         self.assertEqual(model.parse_factors('[20,70,3]'), [20,70,3])
+
+    def test_named_factors_wrappers_and_units(self):
+        model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
+        model.domain = 'diet'
+        values = dict(carbs='45 g', protein=20, fat=12, fiber=6,
+                      mass={'value':350, 'unit':'g'}, calories='400 kcal')
+        for value in (values, {'result':{'nutrition':values}},
+                      [{k:v} for k,v in reversed(list(values.items()))],
+                      [dict(name=k, value=v) for k,v in values.items()]):
+            self.assertEqual(model.parse_factors(json.dumps(value)), [45,20,12,6,350,400])
+        self.assertEqual(model.parse_factors('Here are the totals:\n' + json.dumps(values) + '\nDone.'),
+                         [45,20,12,6,350,400])
+        self.assertEqual(model.parse_factors(json.dumps({'food_items':[values, values]})),
+                         [90,40,24,12,700,800])
+        for value in ([values, values], dict(values, carbs='45 kg'),
+                      dict(values, mass={'value':350, 'unit':'kg'}), dict(values, carbohydrate_g=45)):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                model.parse_factors(json.dumps(value))
+        for answer in ('{"factors":[45,20,12,6,350,400]',
+                       '[45,20,12,6,350,400] [45,20,12,6,350,400]'):
+            with self.assertRaises(ValueError): model.parse_factors(answer)
+        model.domain = 'exercise'
+        self.assertEqual(model.parse_factors('{"duration_min":"20 min","energy_kcal":70,"intensity_MET":"3 MET"}'), [20,70,3])
+        with self.assertRaises(ValueError):
+            model.parse_factors('{"duration":20,"energy":70,"intensity":3,"intensity_scale":"Borg"}')
+
+    def test_generation_repairs_and_reports_bad_output(self):
+        model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
+        model.domain = 'diet'
+        model.vlm = SimpleNamespace(device='cpu', generate=lambda **kwargs:torch.tensor([[1,2,3,4]]))
+        inputs = ({'input_ids':torch.tensor([[1,2]])}, None)
+        with patch.object(model, 'inputs', return_value=inputs) as prompts:
+            decode = unittest.mock.Mock(side_effect=['[1,2,3]', '[45,20,12,6,350,400]'])
+            model.processor = SimpleNamespace(batch_decode=lambda *args, **kwargs:[decode()])
+            torch.testing.assert_close(model.generate_factors('rice', ['meal.jpg']), torch.tensor([45.,20.,12.,6.,350.,400.]))
+            self.assertEqual(model.factor_generation_audit['attempts'], 2)
+            self.assertEqual(prompts.call_count, 2)
+            self.assertIn('previous response was invalid', prompts.call_args.args[0])
+            self.assertEqual(prompts.call_args.args[1], ['meal.jpg'])
+        model.processor = SimpleNamespace(batch_decode=lambda *args, **kwargs:['[1,2,3]'])
+        with patch.object(model, 'inputs', return_value=inputs) as prompts:
+            with self.assertRaisesRegex(ValueError, r'after 3 attempts.*model_response=.*1,2,3'):
+                model.generate_factors('rice')
+            self.assertEqual(prompts.call_count, 3)
 
     def test_processor_output_error_is_actionable(self):
         with self.assertRaisesRegex(ValueError, 'processor.*mapping.*list'):
