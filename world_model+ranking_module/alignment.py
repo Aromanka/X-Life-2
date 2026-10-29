@@ -96,14 +96,17 @@ def preference_objective(model, pairs, reference, beta, device):
     preferred, ref_preferred = pair_scores(model, pairs, 'preferred', reference, device)
     rejected, ref_rejected = pair_scores(model, pairs, 'rejected', reference, device)
     weights = preferred.new_tensor([row['pair_weight'] for row in pairs])
-    margin = preferred-rejected-(ref_preferred-ref_rejected)
+    policy = F.log_softmax(torch.stack([preferred,rejected], -1), dim=-1)
+    reference_policy = F.log_softmax(torch.stack([ref_preferred,ref_rejected], -1), dim=-1)
+    log_ratio = policy-reference_policy
+    margin = log_ratio[:,0]-log_ratio[:,1]
     return (-F.logsigmoid(beta*margin)*weights).sum()/weights.sum(), (preferred > rejected).float().mean()
 
 
 def run_alignment(args, model, checkpoint, config, output):
     settings = config.get('alignment', {})
     beta, fraction = float(settings.get('beta', 2.)), float(settings.get('replay_fraction', .25))
-    if not math.isfinite(beta) or beta <= 0: raise ValueError('Bounded-score beta must be finite and positive')
+    if not math.isfinite(beta) or beta <= 0: raise ValueError('DPO beta must be finite and positive')
     if args.phase == 'physiological' and not .2 <= fraction <= .3: raise ValueError('Physiological replay must be 20–30 percent')
     expected = 'professional' if args.phase == 'physiological' else 'fusion'
     if checkpoint['phase'] != (args.phase if args.resume else expected): raise ValueError(f'{args.phase} requires {expected} initialization or same-phase resume')
@@ -160,7 +163,7 @@ def run_alignment(args, model, checkpoint, config, output):
         history.append(entry); print(json.dumps(entry))
         state = dict(checkpoint)
         state['test_backend'] = model.metadata_encoder.test_backend or checkpoint.get('test_backend', False)
-        state.update(ranking_version=1, phase=args.phase, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), reference_state_dict=reference.state_dict(), reference_parent=checkpoint.get('reference_parent') if args.resume else args.init_checkpoint, parent=args.resume or args.init_checkpoint, alignment=alignment, config=config, epoch=epoch+1, global_step=step, history=history, data=str(Path(args.data).resolve()), rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None)
+        state.update(ranking_version=2, phase=args.phase, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), reference_state_dict=reference.state_dict(), reference_parent=checkpoint.get('reference_parent') if args.resume else args.init_checkpoint, parent=args.resume or args.init_checkpoint, alignment=alignment, config=config, epoch=epoch+1, global_step=step, history=history, data=str(Path(args.data).resolve()), rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None)
         torch.save(state, output/'checkpoint.pt')
         (output/'history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')
         if args.max_steps and local_steps >= args.max_steps: break
@@ -177,5 +180,5 @@ def rank_records(args, model, checkpoint, output):
             batch = batch_candidates([candidate(record['context'], action, checkpoint['vocabulary']) for action in chunk], args.device)
             scores.extend(model.rank(batch, [a['mode'] for a in chunk]).cpu().tolist())
         if not all(math.isfinite(s) for s in scores): raise FloatingPointError('Nonfinite ranking score')
-        results.append(dict(state_id=record['state_id'], checkpoint=str(Path(args.resume or args.init_checkpoint).resolve()), scores=scores, order=sorted(range(len(scores)), key=lambda i:scores[i], reverse=True)))
+        results.append(dict(state_id=record['state_id'], checkpoint=str(Path(args.resume or args.init_checkpoint).resolve()), order=sorted(range(len(scores)), key=lambda i:scores[i], reverse=True)))
     (output/'rankings.json').write_text(json.dumps(results, allow_nan=False), encoding='utf-8')

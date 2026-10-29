@@ -28,7 +28,7 @@ python 'world_model+ranking_module/inference.py' \
 - `--constraints constraints.json` 配置过敏、禁用运动、定量上限和联合时间约束；不从未命名 metadata 数组推断疾病。
 - `--knowledge graph.json` 使用有来源的知识快照；缺图谱明确记录 knowledge_missing。
 
-输出包含共享 context hash、每候选的动作/潜轨迹/预测/排名/安全结论、来源、失败原因和耗时。不足三个输出实际数量，无通过者输出空集。处方格式、合理性和安全规则全部由同级 extra_code 服务实现；仓库内 generation/safety 仅发起 HTTP 请求。服务失联记录失败状态，最终推荐依据服务返回的决策。
+输出包含共享 context hash、每候选的动作/潜轨迹/预测/安全结论、来源、失败原因和耗时。不足三个输出实际数量，无通过者输出空集。处方格式、合理性和安全规则全部由同级 extra_code 服务实现；仓库内 generation/safety 仅发起 HTTP 请求。服务失联记录失败状态，最终推荐依据服务返回的决策。
 
 处方处理端口为 `/v1/candidate/prepare`，完整安全评估端口为 `/v1/safety/evaluate`，与其余角色共用服务地址。
 
@@ -49,10 +49,12 @@ python 'world_model+ranking_module/experiment.py' --data ../data/xlife_cleaned_0
 python -m unittest discover -s 'world_model+ranking_module' -p 'test_*.py'
 ```
 
-排序在同一 train.py 使用 --phase professional，再 --phase physiological，--data 传离线偏好对。单域与融合训练产生的随机 ranking 头不代表训练过的排名。
+排序采用标准 DPO：无界内部 logits 定义候选选择策略，针对冻结参考策略优化偏好对，结果只输出排序、不输出数值分数。在同一 train.py 使用 --phase professional，再 --phase physiological，--data 传离线偏好对。单域与融合训练产生的随机 ranking 头不代表训练过的排名。
 
 experiment.py 固定 participant 80/20，训练参与者内部留出晚期事件并清除六小时重叠窗口，分别报告 seen/unseen。归一化仅拟合训练事件。报告各模式/历史缺失/MAE/逐曲线 Pearson/预测时段/耗时/CUDA 峰值。默认 unseen 为零样本，--adapt-epochs 单独记录参与者事实微调与清除重叠后的晚期评估。
 
 CBG/夜间仅实现显式时间锚点、单位和观测来源的任务校验，当前实际数据没有经确认的 bedtime/wake 标签，未训练或验证整夜预测。模型改动和验收边界见 [方法说明](docs/METHOD.md)。
 
 旧 v2 agents、trainer 和模型配置迁至同级 extra_code/legacy_xlife 保存，不再进入默认导入路径。v2 checkpoint 不兼容。真实大模型、图谱完整性、五次全量研究实验和论文规模动作编码器训练须另行验证。
+
+Ranking 版本已更新为 2。旧 single/fusion 产物可用于初始化；旧有界分数对齐产物需要从 fusion 重新训练排序头，不能继续原对齐训练。

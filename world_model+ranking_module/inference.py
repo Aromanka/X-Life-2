@@ -69,7 +69,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
         if mode in ('exercise','joint'): requirement['duration_min']=random.Random(seed+1).randint(10,30)
     context = deepcopy(context)
     identity = hashlib.sha256(json.dumps(context,sort_keys=True,allow_nan=False).encode()).hexdigest()
-    output = dict(schema_version=1, context=context, context_hash=identity, requirement=requirement,
+    output = dict(schema_version=2, context=context, context_hash=identity, requirement=requirement,
         masked_original_actions=True, ranking_backend=ranking, test_only=ranking=='random',
         knowledge={'source':graph.source,'triples':len(graph.triples),'provenance':graph.provenance}, candidates=[], top_plans=[], failures=[],
         method_status='pending')
@@ -92,7 +92,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
             return output
     else:
         output['generation_provenance'] = {'backend':'prestructured','test_backend':False}
-    valid = []
+    valid, ranking_logits = [], {}
     for i, raw in enumerate(candidates):
         row = dict(id=i+1, candidate=deepcopy(raw), status='pending')
         output['candidates'].append(row)
@@ -131,16 +131,17 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
                 if not torch.isfinite(simulation['predicted_cgm']).all() or not torch.isfinite(simulation['trajectory']).all():
                     raise ValueError('Nonfinite simulation')
                 for j,(row,action,_) in enumerate(chunk):
-                    score = float(simulation['ranking_score'][j]) if ranking=='learned' else random.Random(f'{seed}:{row["id"]}').random()
+                    score = float(simulation['ranking_logit'][j]) if ranking=='learned' else random.Random(f'{seed}:{row["id"]}').random()
                     if not math.isfinite(score): raise ValueError('Nonfinite ranking score')
-                    row.update(status='simulated', ranking_score=score, simulation=finite_json({
+                    ranking_logits[row['id']] = score
+                    row.update(status='simulated', simulation=finite_json({
                         'predicted_cgm':simulation['predicted_cgm'][j], 'trajectory':simulation['trajectory'][j],
                         'gates':simulation['gates'][j] if simulation['gates'] is not None else None,
                         'time_minutes':list(range(5,181,5)), 'onset':action['onset'],
                         'architecture_version':3, 'glucose_unit':constraints.get('glucose_unit','dataset_native_unknown')}))
             except Exception as error:
                 for row,_,_ in chunk: row.update(status='simulation_failed',reason=str(error))
-    for row in sorted(output['candidates'],key=lambda r:r.get('ranking_score',-1),reverse=True):
+    for row in sorted(output['candidates'],key=lambda r:ranking_logits.get(r['id'],float('-inf')),reverse=True):
         if row['status'] != 'simulated': continue
         raw = row['candidate']
         safety_terms = list(raw.get('ingredients',[])) + [raw.get('exercise_type','')] + constraints.get('conditions',[])
@@ -157,7 +158,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
     output['test_only'] |= model.metadata_encoder.test_backend
     output['method_status'] = 'test_substitutes' if output['test_only'] else 'knowledge_missing' if not graph.triples else 'configured_backends'
     output['top_plans'] = sorted([r for r in output['candidates'] if r['status']=='safe'],
-                                key=lambda r:r['ranking_score'],reverse=True)[:top_k]
+                                key=lambda r:ranking_logits[r['id']],reverse=True)[:top_k]
     if not output['top_plans']: output['failures'].append(dict(stage='selection',reason='No candidates passed validation, simulation and safety'))
     return output
 

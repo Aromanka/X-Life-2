@@ -5,13 +5,49 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 import torch
+from torch.nn import functional as F
 from test_metadata import encoded_metadata
 from alignment import NumericPreferencePairs, FrozenRankingReference, preference_objective, batch_candidates
 from train import main
-from world_model import MetabolicWorldModel
+from world_model import MetabolicWorldModel, RankingHead
 
 
 class AlignmentTests(unittest.TestCase):
+    def test_standard_dpo_matches_full_candidate_policy(self):
+        logits = torch.tensor([[2.,-1.,5.],[-3.,4.,1.]],requires_grad=True)
+        reference = torch.tensor([[1.,0.,-2.],[2.,-1.,3.]])
+        pairs = [dict(pair_weight=1.),dict(pair_weight=2.)]
+        def scores(model,pairs,side,ref,device):
+            index = 0 if side=='preferred' else 1
+            return logits[:,index],reference[:,index]
+        with patch('alignment.pair_scores',side_effect=scores): loss,_ = preference_objective(None,pairs,None,2.,'cpu')
+        ratio = logits.log_softmax(-1)-reference.log_softmax(-1)
+        expected = (-F.logsigmoid(2*(ratio[:,0]-ratio[:,1]))*torch.tensor([1.,2.])).sum()/3
+        torch.testing.assert_close(loss,expected)
+        torch.testing.assert_close(torch.autograd.grad(loss,logits,retain_graph=True)[0],torch.autograd.grad(expected,logits)[0])
+        self.assertFalse(reference.requires_grad)
+
+    def test_unbounded_logits_and_wrong_order_gradient(self):
+        head = RankingHead(8,2,1).eval()
+        with torch.no_grad(): head.score[-1].weight.zero_(); head.score[-1].bias.fill_(3.)
+        self.assertTrue((head(torch.zeros(2,3,8),'diet')>1).all())
+        with torch.no_grad(): head.score[-1].bias.fill_(-3.)
+        self.assertTrue((head(torch.zeros(2,3,8),'diet')<0).all())
+        logits = torch.tensor([-20.,20.],requires_grad=True)
+        def scores(model,pairs,side,ref,device): return logits[0 if side=='preferred' else 1].reshape(1),torch.zeros(1)
+        with patch('alignment.pair_scores',side_effect=scores): loss,_ = preference_objective(None,[dict(pair_weight=1.)],None,2.,'cpu')
+        loss.backward()
+        self.assertLess(float(logits.grad[0]),-1.9)
+        with patch('alignment.pair_scores',side_effect=lambda m,p,s,r,d:(torch.tensor([20. if s=='preferred' else -20.]),torch.zeros(1))):
+            loss,_ = preference_objective(None,[dict(pair_weight=1.)],None,2.,'cpu')
+        self.assertLess(float(loss),1e-10)
+
+    def test_bounded_alignment_checkpoint_rejected(self):
+        checkpoint = dict(ranking_version=1,phase='professional',model_state_dict=self.model.state_dict())
+        with self.assertRaisesRegex(ValueError,'restart alignment'): self.model.load_checkpoint(checkpoint)
+        checkpoint['phase'] = 'fusion'
+        self.model.load_checkpoint(checkpoint)
+
     def setUp(self):
         torch.set_num_threads(2); torch.manual_seed(3)
         self.config = dict(dimension=16, basis_dim=8, heads=2, layers=1)
@@ -45,7 +81,7 @@ class AlignmentTests(unittest.TestCase):
         for mode in predictions:
             result = self.model.simulate(batch,mode)
             torch.testing.assert_close(result['predicted_cgm'],predictions[mode],rtol=0,atol=0)
-            self.assertTrue(((result['ranking_score']>=0)&(result['ranking_score']<=1)).all())
+            self.assertTrue(torch.isfinite(result['ranking_logit']).all())
 
     def test_data_guards(self):
         invalid = deepcopy(self.row); invalid['rejected']['target'] = [6.]*36
@@ -74,7 +110,7 @@ class AlignmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch('builtins.print'):
             root = Path(directory)
             parent = root/'fusion.pt'
-            torch.save(dict(architecture_version=3, ranking_version=1, model_config=self.config, model_state_dict=self.model.state_dict(), llm_actions=False, phase='fusion', vocabulary={}, config={}, trained_domains=['diet','exercise']),parent)
+            torch.save(dict(architecture_version=3, ranking_version=2, model_config=self.config, model_state_dict=self.model.state_dict(), llm_actions=False, phase='fusion', vocabulary={}, config={}, trained_domains=['diet','exercise']),parent)
             rows = []
             for i,mode in enumerate(('diet','exercise','joint')):
                 row = deepcopy(self.row); row['state_id'] = str(i); row['context']['origin'] = f'2025-01-0{i+1}T12:00:00'
@@ -107,8 +143,9 @@ class AlignmentTests(unittest.TestCase):
             result = json.loads((root/'rank/rankings.json').read_text())[0]
             restored = MetabolicWorldModel(**self.config); restored.load_checkpoint(resumed)
             samples = [NumericPreferencePairs([r],{},'professional')[0]['preferred'] for r in rows]
-            expected = [float(restored.simulate(batch_candidates([s],'cpu'),mode)['ranking_score'][0]) for s,mode in zip(samples,('diet','exercise','joint'))]
-            torch.testing.assert_close(torch.tensor(result['scores']),torch.tensor(expected))
+            expected = [float(restored.simulate(batch_candidates([s],'cpu'),mode)['ranking_logit'][0]) for s,mode in zip(samples,('diet','exercise','joint'))]
+            self.assertNotIn('scores', result)
+            self.assertEqual(result['order'], sorted(range(len(expected)),key=lambda i:expected[i],reverse=True))
 
 
 if __name__ == '__main__': unittest.main()

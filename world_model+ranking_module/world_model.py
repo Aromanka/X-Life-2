@@ -158,7 +158,7 @@ class MetabolicWorldModel(nn.Module):
         states = torch.stack(states, 1)
         q, glucose = (self.fusion if mode == 'joint' else getattr(self, mode)).readout(states)
         if self.readout == 'autoregressive': glucose = self.ar_decoders[mode](None, q).squeeze(-1)
-        return dict(predicted_cgm=last[:, None]+glucose*self.glucose_scale, trajectory=q, ranking_score=self.ranking_head(q, mode), states=states, gates=torch.stack(gates, 1) if gates else None)
+        return dict(predicted_cgm=last[:, None]+glucose*self.glucose_scale, trajectory=q, ranking_logit=self.ranking_head(q, mode), states=states, gates=torch.stack(gates, 1) if gates else None)
 
     @torch.no_grad()
     def rank(self, batch, modes):
@@ -168,12 +168,14 @@ class MetabolicWorldModel(nn.Module):
             if mode not in ('diet', 'exercise', 'joint') or not self.ranked_modes[('diet', 'exercise', 'joint').index(mode)]: raise ValueError(f'No trained ranking for {mode}')
             indices = [i for i, value in enumerate(modes) if value == mode]
             part = {k:v[indices] if isinstance(v, torch.Tensor) else [v[i] for i in indices] for k,v in batch.items()}
-            scores[indices] = self.simulate(part, mode)['ranking_score']
+            scores[indices] = self.simulate(part, mode)['ranking_logit']
         return scores
 
     def load_checkpoint(self, checkpoint):
         if 'metadata_encoder.mean' in checkpoint['model_state_dict']: raise ValueError('Numeric metadata checkpoints require retraining with semantic metadata')
-        if checkpoint.get('ranking_version') == 1: return self.load_state_dict(checkpoint['model_state_dict'])
+        if checkpoint.get('ranking_version') != 2 and (checkpoint.get('phase') in ('professional','physiological') or checkpoint['model_state_dict'].get('ranked_modes', torch.zeros(3,dtype=torch.bool)).any()):
+            raise ValueError('Bounded ranking checkpoints cannot resume DPO; restart alignment from a fusion checkpoint')
+        if checkpoint.get('ranking_version') in (1,2): return self.load_state_dict(checkpoint['model_state_dict'])
         state = checkpoint['model_state_dict']
         missing = set(self.state_dict()) - set(state)
         allowed = {key for key in self.state_dict() if key.startswith('ranking_head.')} | {'ranked_modes'}
@@ -193,7 +195,7 @@ class RankingHead(nn.Module):
         super().__init__()
         self.projections = nn.ModuleDict({mode:nn.Linear(dimension*(2 if mode == 'joint' else 1), dimension) for mode in ('diet', 'exercise', 'joint')})
         self.backbone = transformer_encoder(dimension, heads, layers, 0.)
-        self.score = nn.Sequential(nn.Linear(dimension, dimension), nn.GELU(), nn.Linear(dimension, 1), nn.Sigmoid())
+        self.score = nn.Sequential(nn.Linear(dimension, dimension), nn.GELU(), nn.Linear(dimension, 1))
 
     def forward(self, trajectory, mode):
         tokens = self.projections[mode](trajectory)
