@@ -26,7 +26,9 @@ python 'world_model+ranking_module/inference.py' \
 - `--constraints constraints.json` 配置过敏、禁用运动、定量上限和联合时间约束；不从未命名 metadata 数组推断疾病。
 - `--knowledge graph.json` 使用有来源的知识快照；缺图谱明确记录 knowledge_missing。
 
-输出包含共享 context hash、每候选的动作/潜轨迹/预测/排名/安全结论、来源、失败原因和耗时。不足三个输出实际数量，无通过者输出空集。审查服务故障或格式错误拒绝候选，硬规则否决不能被排序或语义接受覆盖。
+输出包含共享 context hash、每候选的动作/潜轨迹/预测/排名/安全结论、来源、失败原因和耗时。不足三个输出实际数量，无通过者输出空集。处方格式、合理性和安全规则全部由同级 extra_code 服务实现；仓库内 generation/safety 仅发起 HTTP 请求。服务失联记录失败状态，最终推荐依据服务返回的决策。
+
+处方处理端口为 `/v1/candidate/prepare`，完整安全评估端口为 `/v1/safety/evaluate`，与其余角色共用服务地址。
 
 HTTP 动作 latent 分支需要 XLIFE_USE_LLM_ACTION_ENCODERS=1、匹配的 action_backend_id/维度及重新训练的投影；不能直接切换数值 checkpoint。详见 [HTTP 契约](docs/HTTP_INFERENCE.md)。
 

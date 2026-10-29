@@ -9,10 +9,10 @@ import random
 import time
 import torch
 from collections import Counter
-from alignment import candidate, batch_candidates
+from alignment import batch_candidates
 from backends.http import HTTPBackend
 from dataset import XLifeCleanedDataset
-from generation import validate_candidate,normalize_candidate
+from generation import prepare
 from knowledge import KnowledgeGraph
 from safety import assess
 from world_model import MetabolicWorldModel, llm_actions_enabled
@@ -29,6 +29,18 @@ def finite_json(value):
 def masked_context(sample):
     # Deliberate allowlist: original diet, exercise, texts, onset and future targets never escape.
     return finite_json({k:sample[k] for k in ('subject_id','origin','history','history_mask','metadata')})
+
+
+def model_candidate(context,action,vocabulary):
+    """Tensor serialization of remotely prepared inputs, without prescription policy."""
+    sample={key:torch.tensor([float('nan') if v is None else v for v in values],dtype=torch.float32)
+            for key,values in {**{k:context[k] for k in ('history','metadata')},
+                               **{k:action[k] for k in ('diet','exercise','onset')}}.items()}
+    sample['history_mask']=torch.tensor(context['history_mask'],dtype=torch.bool)
+    sample['history']=sample['history'].masked_fill(~sample['history_mask'],0.)
+    sample['type_id']=torch.tensor(vocabulary.get(action.get('exercise_type',''),0))
+    for key in ('diet_text','exercise_text'): sample[key]=action.get(key,'')
+    return sample
 
 
 def load_model(path, device):
@@ -89,9 +101,11 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
                 row['candidate'], row['extraction_provenance'] = raw, response['provenance']
                 output['test_only'] |= response['provenance']['test_backend']
             row['raw_candidate']=deepcopy(raw)
-            raw=normalize_candidate(raw)
-            row['candidate']=raw
-            action = validate_candidate(deepcopy(raw))
+            prepared=prepare(raw,backend)
+            row['preparation_provenance']=prepared['provenance']
+            output['test_only'] |= prepared['provenance']['test_backend']
+            row['candidate']=prepared['result']['candidate']
+            action=prepared['result']['action']
             if action['mode'] == 'joint' and checkpoint['phase'] not in ('fusion','professional','physiological'):
                 raise ValueError('Joint simulation requires a fusion-trained checkpoint')
             trained = checkpoint.get('trained_domains', [])
@@ -99,7 +113,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
                 raise ValueError('Checkpoint has no trained dynamics for requested domain')
             if ranking == 'learned' and not model.ranked_modes[('diet','exercise','joint').index(action['mode'])]:
                 raise ValueError('No trained ranking for mode; use --ranking random explicitly for smoke tests')
-            sample = candidate(context,action,checkpoint['vocabulary'])
+            sample = model_candidate(context,action,checkpoint['vocabulary'])
             valid.append((row,action,sample))
         except Exception as error:
             row.update(status='invalid',reason=str(error))
@@ -128,7 +142,11 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
         raw = row['candidate']
         safety_terms = list(raw.get('ingredients',[])) + [raw.get('exercise_type','')] + constraints.get('conditions',[])
         row['safety_knowledge']=graph.retrieve(safety_terms,'safety')
-        row['assessment'] = assess(raw,context,row['simulation'],constraints,row['safety_knowledge'],backend)
+        try:
+            row['assessment'] = assess(raw,context,row['simulation'],constraints,row['safety_knowledge'],backend)
+        except Exception as error:
+            row.update(status='safety_failed',reason=str(error))
+            continue
         row['status'] = 'safe' if row['assessment']['is_safe'] else 'rejected'
         output['test_only'] |= row['assessment']['provenance']['test_backend']
     if model.llm_actions:
