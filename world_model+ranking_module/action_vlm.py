@@ -1,4 +1,6 @@
 import json
+import math
+from collections.abc import Mapping
 from pathlib import Path
 import torch
 from torch import nn
@@ -32,15 +34,38 @@ class ActionVLM(nn.Module):
         content.append({'type':'text', 'text':instruction + '\n' + text})
         messages = [{'role':'user', 'content':content}]
         prompt = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors='pt')
+        self.validate_processor_output(prompt)
         if annotations is None: return prompt, prompt['attention_mask'].clone()
         messages.append({'role':'assistant', 'content':[{'type':'text', 'text':json.dumps(annotations, ensure_ascii=False)}]})
         inputs = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=False, return_dict=True, return_tensors='pt')
+        self.validate_processor_output(inputs)
         length = prompt['input_ids'].size(1)
         if not torch.equal(inputs['input_ids'][:, :length], prompt['input_ids']): raise ValueError('Annotation prompt prefix mismatch')
         labels = inputs['input_ids'].clone(); labels[:, :length] = -100
         inputs['labels'] = labels
         mask = inputs['attention_mask'].clone(); mask[:, length:] = 0
         return inputs, mask
+
+    @staticmethod
+    def validate_processor_output(inputs):
+        if not isinstance(inputs, Mapping) or not {'input_ids', 'attention_mask'} <= inputs.keys():
+            raise ValueError('Qwen processor must return input_ids and attention_mask in a mapping; '
+                             f'got {type(inputs).__name__}. Check the model processor and transformers version '
+                             '(requirements.txt pins transformers==4.57.1).')
+
+    def parse_factors(self, answer):
+        if answer.startswith('```'):
+            answer = answer.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        result = json.loads(answer)
+        # Pretrained VLMs may emit the requested vector without its object wrapper.
+        # Both forms preserve the exact same factor order, count and validation.
+        factors = result.get('factors') if isinstance(result, dict) else result
+        if not isinstance(factors, list) or len(factors) != (6 if self.domain == 'diet' else 3):
+            raise ValueError('Expected action JSON {"factors":[numbers]} or a numeric array '
+                             f'with {6 if self.domain == "diet" else 3} factors; got {type(result).__name__}')
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 for v in factors):
+            raise ValueError('Generated action factors must be finite nonnegative numbers')
+        return factors
 
     def forward(self, inputs, pooling_mask, factors=None):
         output = self.vlm(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
@@ -68,8 +93,5 @@ class ActionVLM(nn.Module):
         inputs = {k:v.to(self.vlm.device) for k,v in inputs.items()}
         generated = self.vlm.generate(**inputs, max_new_tokens=256, do_sample=False)
         answer = self.processor.batch_decode(generated[:, inputs['input_ids'].size(1):], skip_special_tokens=True)[0].strip()
-        if answer.startswith('```'): answer = answer.split('\n',1)[1].rsplit('```',1)[0].strip()
-        factors = json.loads(answer)['factors']
-        if not isinstance(factors,list) or len(factors) != (6 if self.domain == 'diet' else 3): raise ValueError('Invalid generated action factor count')
-        if any(isinstance(v,bool) or not isinstance(v,(int,float)) for v in factors): raise ValueError('Generated action factors must be numbers')
+        factors = self.parse_factors(answer)
         return torch.tensor(factors, device=self.vlm.device, dtype=torch.float32)

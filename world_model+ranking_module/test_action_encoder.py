@@ -50,6 +50,25 @@ class ActionEncoderTests(unittest.TestCase):
         with patch('backends.action_encoder.HTTPBackend.call', return_value=bad):
             with self.assertRaises(ValueError): encoder(['walking'])
 
+    def test_pretrained_factor_json_variants(self):
+        model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
+        model.domain = 'diet'
+        for answer in ('{"factors":[45,20,12,6,350,400]}', '[45,20,12,6,350,400]',
+                       '```json\n[45,20,12,6,350,400]\n```'):
+            self.assertEqual(model.parse_factors(answer), [45,20,12,6,350,400])
+        for answer in ('[{"factors":[45,20,12,6,350,400]}]', '{}', 'null',
+                       '[45,20,12,6,350]', '[45,20,12,6,350,null]',
+                       '[45,20,12,6,350,true]', '[45,20,12,6,350,-1]',
+                       '[45,20,12,6,350,NaN]', '[45,20,12,6,350,Infinity]'):
+            with self.subTest(answer=answer), self.assertRaises(ValueError):
+                model.parse_factors(answer)
+        model.domain = 'exercise'
+        self.assertEqual(model.parse_factors('[20,70,3]'), [20,70,3])
+
+    def test_processor_output_error_is_actionable(self):
+        with self.assertRaisesRegex(ValueError, 'processor.*mapping.*list'):
+            ActionVLM.validate_processor_output([[1,2,3]])
+
     def test_pooling_excludes_supervision_and_trains_backbone(self):
         class Backbone(nn.Module):
             def __init__(self): super().__init__(); self.weight = nn.Parameter(torch.ones(1))
