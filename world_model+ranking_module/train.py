@@ -19,6 +19,16 @@ def collate(rows, vocabulary):
 def device_batch(batch, device): return {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
 
 
+def physiological_loss(model, batch, mode):
+    """Shared factual objective for the trainer and controlled experiments."""
+    predicted = model(batch, mode, horizon=batch['target'].size(1))['predicted_cgm']
+    valid = batch['target_mask']
+    if not valid.any(): raise ValueError('No measured physiological labels')
+    loss = ((predicted[valid]-batch['target'][valid])/model.glucose_scale).square().mean()
+    if not torch.isfinite(loss): raise FloatingPointError('Nonfinite training loss')
+    return loss
+
+
 def split_samples(samples, strategy, seed, splits=None):
     if strategy == 'subject':
         if splits is None:
@@ -85,7 +95,9 @@ def main(argv=None):
     parser.add_argument('--data', required=True)
     parser.add_argument('--dataset', choices=['xlife_cleaned', 'sample'], default='xlife_cleaned')
     parser.add_argument('--config')
-    parser.add_argument('--phase', choices=['single', 'fusion'], default='single')
+    parser.add_argument('--phase', choices=['single', 'fusion', 'professional', 'physiological'], default='single')
+    parser.add_argument('--replay-data')
+    parser.add_argument('--rank-only', action='store_true')
     parser.add_argument('--domain', choices=['both', 'diet', 'exercise'], default='both')
     parser.add_argument('--output', required=True)
     parser.add_argument('--init-checkpoint')
@@ -105,6 +117,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.batch_size < 1 or any(v is not None and v < 1 for v in (args.max_steps, args.max_subjects, args.max_samples)): raise ValueError('Counts must be positive')
     if args.resume and args.init_checkpoint: raise ValueError('Choose resume or initialization')
+    if args.rank_only and args.predict_only: raise ValueError('Choose ranking or physiological evaluation')
     random.seed(args.seed); torch.manual_seed(args.seed)
     config = json.loads(Path(args.config).read_text(encoding='utf-8')) if args.config else {}
     model_config = config.get('model', {})
@@ -115,6 +128,17 @@ def main(argv=None):
         if checkpoint.get('architecture_version') != 3: raise ValueError('Expected architecture_version 3')
         if checkpoint['llm_actions'] != llm_actions_enabled(): raise ValueError('Checkpoint action backend differs from environment')
         model_config = checkpoint['model_config']
+    if args.rank_only or (args.phase in {'professional', 'physiological'} and not args.predict_only):
+        if not checkpoint: raise ValueError('Alignment and ranking require a checkpoint')
+        from alignment import run_alignment, rank_records
+        model = MetabolicWorldModel(**model_config)
+        model.load_checkpoint(checkpoint); model.to(args.device)
+        output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
+        if args.rank_only:
+            if checkpoint['phase'] not in {'professional', 'physiological'}: raise ValueError('Ranking requires an aligned checkpoint')
+            rank_records(args, model, checkpoint, output)
+        else: run_alignment(args, model, checkpoint, config if args.config else checkpoint.get('config', {}), output)
+        return
     if (args.predict_only or args.phase == 'fusion') and not checkpoint: raise ValueError('A checkpoint is required')
     dataset = {'xlife_cleaned': XLifeCleanedDataset, 'sample': SampleNumericDataset}[args.dataset](args.data, args.max_subjects, args.max_samples)
     if not dataset.samples: raise ValueError('No usable records')
@@ -125,7 +149,7 @@ def main(argv=None):
     vocabulary = checkpoint['vocabulary'] if checkpoint else {v:i+1 for i,v in enumerate(sorted({s['exercise_type'] for s in groups['train'] if s['exercise_type']}))}
     if len(vocabulary) >= 128: raise ValueError('Too many exercise categories')
     model = MetabolicWorldModel(**model_config)
-    if checkpoint: model.load_state_dict(checkpoint['model_state_dict'])
+    if checkpoint: model.load_checkpoint(checkpoint)
     else: model.fit(groups['train'])
     if args.phase == 'fusion' and not args.resume and not args.predict_only:
         if checkpoint['phase'] != 'single' or set(checkpoint['trained_domains']) != {'diet','exercise'}: raise ValueError('Fusion requires both pretrained domains')
@@ -135,8 +159,8 @@ def main(argv=None):
     print(json.dumps(dict(records=len(dataset), skipped=dataset.skipped, splits={k:len(v) for k,v in groups.items()}, device=args.device)))
     if strategy == 'within_subject': print(json.dumps(dict(split_strategy=strategy,validation_windows_overlapping_train_windows=temporal_overlap(groups))))
     if args.predict_only:
-        if args.mode == 'joint' and checkpoint['phase'] != 'fusion': raise ValueError('Joint prediction requires fusion training')
-        metrics, predictions = evaluate(model, groups[args.split], vocabulary, args.device, args.batch_size, args.mode or ('joint' if checkpoint['phase']=='fusion' else None),args.joint_only)
+        if args.mode == 'joint' and checkpoint['phase'] not in {'fusion', 'professional', 'physiological'}: raise ValueError('Joint prediction requires fusion training')
+        metrics, predictions = evaluate(model, groups[args.split], vocabulary, args.device, args.batch_size, args.mode or ('joint' if checkpoint['phase'] in {'fusion', 'professional', 'physiological'} else None),args.joint_only)
         if not predictions: raise ValueError('No prediction samples in selected split/mode')
         (output/'predictions.json').write_text(json.dumps(predictions, allow_nan=False), encoding='utf-8')
         (output/'metrics.json').write_text(json.dumps(metrics, allow_nan=False), encoding='utf-8')
@@ -172,10 +196,7 @@ def main(argv=None):
                 except StopIteration: iterators[domain] = iter(loader); batch = next(iterators[domain])
                 batch = device_batch(batch, args.device)
                 optimizer.zero_grad(set_to_none=True)
-                predicted = model(batch, domain)['predicted_cgm']
-                valid = batch['target_mask']
-                loss = ((predicted[valid]-batch['target'][valid])/model.glucose_scale).square().mean()
-                if not torch.isfinite(loss): raise FloatingPointError('Nonfinite training loss')
+                loss = physiological_loss(model, batch, domain)
                 loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
                 global_step += 1; local_steps += 1; totals += float(loss.detach()); counts += 1
                 if domain != 'joint': trained_domains.add(domain)
@@ -192,7 +213,8 @@ def main(argv=None):
         entry = dict(epoch=epoch+1, step=global_step, loss=totals/counts, learning_rate=optimizer.param_groups[0]['lr'], best_validation_mae=best_mae if best_mae<float('inf') else None, bad_epochs=bad_epochs, train=train_metrics, validation=metrics)
         history.append(entry); print(json.dumps(entry))
         state = dict(architecture_version=3, schema_version=1, phase=args.phase, trained_domains=sorted(trained_domains), model_config=model_config, llm_actions=model.llm_actions, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), splits=splits, vocabulary=vocabulary, epoch=epoch+1, global_step=global_step, history=history, rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None, parent=checkpoint_path, data=str(Path(args.data).resolve()), config=config)
-        state.update(split_strategy=strategy,scheduler=scheduler.state_dict(),best_mae=best_mae,bad_epochs=bad_epochs)
+        state.update(ranking_version=1,split_strategy=strategy,scheduler=scheduler.state_dict(),best_mae=best_mae,bad_epochs=bad_epochs)
+        state['test_backend'] = bool(model.llm_actions and (model.diet_vlm.test_backend or model.exercise_vlm.test_backend))
         torch.save(state, output/'checkpoint.pt')
         if improved: torch.save(state,output/'best.pt')
         (output/'history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')

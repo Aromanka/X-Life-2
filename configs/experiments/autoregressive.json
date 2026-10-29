@@ -1,0 +1,1 @@
+{"model":{"dimension":64,"basis_dim":64,"heads":4,"layers":2,"patch_size":6,"readout":"autoregressive"}}

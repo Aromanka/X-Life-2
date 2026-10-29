@@ -1,0 +1,42 @@
+# HTTP inference contract
+
+POST JSON to `XLIFE_LLM_URL/v1/{role}` (default localhost:8765). Roles: `generate`, `safety`, `action/explicit`, `action/latent`, `embed`, `knowledge/extract`, `teacher`. Prompts and upstream model selection belong to sibling `extra_code` only. Importing the client performs no I/O.
+
+Response envelope: `{"result":...,"provenance":{"role":...,"backend":...,"test_backend":boolean}}`. Backend failures do not silently produce mock success.
+
+## Candidate
+
+```json
+{
+  "mode": "joint",
+  "diet": [45, 20, 12, 6, 350, 400],
+  "exercise": [20, 70, null],
+  "exercise_type": "walking",
+  "intensity_scale": "unknown",
+  "onset": [0, -20],
+  "ingredients": ["rice", "vegetables"],
+  "description": "Quantified meal followed by walking",
+  "contraindications": [],
+  "units": {
+    "diet": ["g", "g", "g", "g", "g", "kcal"],
+    "exercise": ["min", "kcal", "scale"],
+    "onset": "min"
+  }
+}
+```
+
+Diet order: carbohydrate/protein/fat/fiber/mass/energy. Exercise: duration/energy/intensity. Null means unobserved, distinct from zero. Active diet requires all six quantities; exercise requires positive duration and type. Named-scale intensity stays in the audit record and is masked for numeric models with undefined training intensity scales. `[0,-20]` means meal at origin and exercise 20 minutes later. No portion multiplication is repeated.
+
+Generation returns `{"candidates":[...]}`. Safety returns `{"is_safe":boolean,"reasons":[strings],"checks":[{"name":string,"passed":boolean}]}`; malformed or missing checks reject, and any failed check rejects. Requests include the measured history and model simulation explicitly identified as a prediction. Local hard vetoes remain independent of semantic acceptance.
+
+Constraints support `allergies`, `conditions`, `forbidden_exercise_types`, `max_carbs_g`, `max_energy_kcal`, `max_duration_min`, `min_exercise_delay_min`. Optional `glucose_unit` and `predicted_glucose_bounds={"unit":...,"min":...,"max":...}` require caller-verified matching units. No new clinical thresholds or unnamed clinical-array meanings are assumed.
+
+`action/explicit` accepts text/structured action and returns `{"action":candidate}`. `action/latent` accepts domain/text/dimension and returns vector/backend_id. The local projection belongs to the checkpoint. Random latent output is request-deterministic and marked test-only; real latent pooling runs server-local hidden-state extraction and requires the exact hidden dimension. Chat completion text does not substitute hidden states.
+
+## Knowledge and task extensions
+
+`knowledge_cli.py --input guideline.txt guideline.pdf --output graph.json` extracts via POST then normalizes/deduplicates attributed `head/relation/tail/source` triples. A provenance sidecar records extraction identities. Generation uses substring retrieval; safety uses exact entities. Vector retrieval is explicit and returns embedding provenance. The optional Neo4j adapter connects only when snapshot is requested. Missing graph data is visible in inference output.
+
+`experiment.py --task-data windows.json --output outputs/task_validation` validates explicit CBG/night records. Required: task, subject_id, origin, history_minutes, target_minutes, history_points/target_points as timestamp-value pairs, glucose_unit, label_source. Night additionally requires bedtime equal to origin and wake_time matching target_minutes. This is data validation, not task training or performance validation.
+
+Generated counterfactual actions have no observed future outcome, so the demonstration pipeline does not report prediction accuracy for them. Factual evaluation belongs to the trainer/experiment entry. Mock generation/review, random ranking and random latents prove interfaces only.

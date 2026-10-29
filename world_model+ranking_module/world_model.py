@@ -50,8 +50,11 @@ class Transition(nn.Module):
 
 class MetabolicWorldModel(nn.Module):
     """Residual diet, exercise and gated joint dynamics."""
-    def __init__(self, dimension=128, basis_dim=128, heads=4, layers=2, patch_size=6, diet_model_path=None, exercise_model_path=None):
+    def __init__(self, dimension=128, basis_dim=128, heads=4, layers=2, patch_size=6, diet_model_path=None, exercise_model_path=None,
+                 action_latent_dimension=128, action_backend_id=None, state_pooling="both", gap_feature=True, readout="direct"):
         super().__init__()
+        if diet_model_path or exercise_model_path:
+            raise ValueError('Local language-model paths are retired; configure the external HTTP role service')
         self.dimension, self.llm_actions = dimension, llm_actions_enabled()
         self.diet_encoder, self.exercise_encoder = NumericEncoder(6, dimension), NumericEncoder(3, dimension)
         self.metadata_encoder = NumericEncoder(84, dimension)
@@ -64,12 +67,19 @@ class MetabolicWorldModel(nn.Module):
         self.gate = nn.Linear(2*basis_dim, 3)
         self.register_buffer('glucose_mean', torch.tensor(0.))
         self.register_buffer('glucose_scale', torch.tensor(1.))
+        if state_pooling not in ('both','pooled','recent') or readout not in ('direct','autoregressive'):
+            raise ValueError('Unknown controlled ablation')
+        self.state_pooling, self.gap_feature, self.readout = state_pooling, gap_feature, readout
+        if readout == 'autoregressive':
+            from model import CGMTransformerDecoder
+            self.ar_decoders = nn.ModuleDict({name:CGMTransformerDecoder(d_model=dimension*(2 if name=='joint' else 1), nhead=heads, num_layers=layers, dropout=0.) for name in ('diet','exercise','joint')})
         if self.llm_actions:
-            if not diet_model_path or not exercise_model_path: raise ValueError('Both domain VLM paths are required')
-            from model import ImageEncoder
-            self.diet_vlm = ImageEncoder(hidden_dim=dimension, model_path=diet_model_path)
-            self.exercise_vlm = ImageEncoder(hidden_dim=dimension, model_path=exercise_model_path)
-            self.diet_vlm.requires_grad_(False); self.exercise_vlm.requires_grad_(False)
+            if not action_backend_id: raise ValueError('Configure action_backend_id for HTTP action encoders')
+            from backends.action_encoder import HTTPActionEncoder
+            self.diet_vlm = HTTPActionEncoder('diet', dimension, action_latent_dimension, action_backend_id)
+            self.exercise_vlm = HTTPActionEncoder('exercise', dimension, action_latent_dimension, action_backend_id)
+        self.ranking_head = RankingHead(dimension, heads, layers)
+        self.register_buffer('ranked_modes', torch.zeros(3, dtype=torch.bool))
 
     def fit(self, samples):
         for name in ('diet', 'exercise', 'metadata'):
@@ -93,10 +103,13 @@ class MetabolicWorldModel(nn.Module):
         if (last_index < 0).any(): raise ValueError('History requires at least one measured value')
         last = history.gather(1, last_index[:, None]).squeeze(1)
         recent = encoded[torch.arange(len(history), device=history.device), last_index//self.cgm_encoder.patch_size]
-        state = self.state_projection(torch.cat([pooled, recent, self.metadata_encoder(batch['metadata']), ((last-self.glucose_mean)/self.glucose_scale)[:, None], (35-last_index)[:, None]/36], -1))
+        if self.state_pooling == 'pooled': recent = torch.zeros_like(recent)
+        if self.state_pooling == 'recent': pooled = torch.zeros_like(pooled)
+        gap = (history.size(1)-1-last_index)[:, None]/history.size(1) if self.gap_feature else torch.zeros_like(last_index[:,None])
+        state = self.state_projection(torch.cat([pooled, recent, self.metadata_encoder(batch['metadata']), ((last-self.glucose_mean)/self.glucose_scale)[:, None], gap], -1))
         if self.llm_actions:
-            diet = self.diet_vlm([None]*len(history), batch['diet_text'])
-            exercise = self.exercise_vlm([None]*len(history), batch['exercise_text'])
+            diet = self.diet_vlm(batch['diet_text'])
+            exercise = self.exercise_vlm(batch['exercise_text'])
         else:
             diet = self.diet_encoder(batch['diet'])
             exercise = self.exercise_encoder(batch['exercise']) + self.type_embedding(batch['type_id'])
@@ -108,13 +121,17 @@ class MetabolicWorldModel(nn.Module):
         with torch.no_grad(): self.fusion.basis.copy_(torch.block_diag(self.diet.basis, self.exercise.basis))
 
     def configure_phase(self, phase):
+        if phase not in {'single', 'fusion', 'professional', 'physiological'}: raise ValueError('Invalid training phase')
         self.requires_grad_(False)
-        names = ('diet_encoder', 'exercise_encoder', 'type_embedding', 'metadata_encoder', 'cgm_encoder', 'state_projection', 'diet', 'exercise') if phase == 'single' else ('fusion', 'gate')
+        if phase in {'single', 'fusion'}: self.ranked_modes.zero_()
+        names = ('diet_encoder', 'exercise_encoder', 'type_embedding', 'metadata_encoder', 'cgm_encoder', 'state_projection', 'diet', 'exercise') if phase == 'single' else ('fusion', 'gate') if phase == 'fusion' else ('ranking_head',)
         for name in names: getattr(self, name).requires_grad_(True)
         if phase == 'fusion':
             self.diet.conditioning.requires_grad_(True); self.exercise.conditioning.requires_grad_(True)
-        if self.llm_actions:
-            self.diet_vlm.requires_grad_(False); self.exercise_vlm.requires_grad_(False)
+        if self.llm_actions and phase == 'single':
+            self.diet_vlm.projection.requires_grad_(True); self.exercise_vlm.projection.requires_grad_(True)
+        if self.readout == 'autoregressive' and phase in ('single','fusion'):
+            for domain in (('joint',) if phase == 'fusion' else ('diet','exercise')): self.ar_decoders[domain].requires_grad_(True)
 
     def train(self, mode=True):
         super().train(mode)
@@ -137,7 +154,27 @@ class MetabolicWorldModel(nn.Module):
             states.append(state)
         states = torch.stack(states, 1)
         q, glucose = (self.fusion if mode == 'joint' else getattr(self, mode)).readout(states)
-        return dict(predicted_cgm=last[:, None]+glucose*self.glucose_scale, trajectory=q, states=states, gates=torch.stack(gates, 1) if gates else None)
+        if self.readout == 'autoregressive': glucose = self.ar_decoders[mode](None, q).squeeze(-1)
+        return dict(predicted_cgm=last[:, None]+glucose*self.glucose_scale, trajectory=q, ranking_score=self.ranking_head(q, mode), states=states, gates=torch.stack(gates, 1) if gates else None)
+
+    @torch.no_grad()
+    def rank(self, batch, modes):
+        if len(modes) != len(batch['history']): raise ValueError('One mode per candidate is required')
+        scores = batch['history'].new_empty(len(modes))
+        for mode in set(modes):
+            if mode not in ('diet', 'exercise', 'joint') or not self.ranked_modes[('diet', 'exercise', 'joint').index(mode)]: raise ValueError(f'No trained ranking for {mode}')
+            indices = [i for i, value in enumerate(modes) if value == mode]
+            part = {k:v[indices] if isinstance(v, torch.Tensor) else [v[i] for i in indices] for k,v in batch.items()}
+            scores[indices] = self.simulate(part, mode)['ranking_score']
+        return scores
+
+    def load_checkpoint(self, checkpoint):
+        if checkpoint.get('ranking_version') == 1: return self.load_state_dict(checkpoint['model_state_dict'])
+        state = checkpoint['model_state_dict']
+        missing = set(self.state_dict()) - set(state)
+        allowed = {key for key in self.state_dict() if key.startswith('ranking_head.')} | {'ranked_modes'}
+        if missing != allowed or set(state)-set(self.state_dict()): raise ValueError('Incompatible legacy numeric checkpoint')
+        self.load_state_dict(state, strict=False)
 
     @torch.no_grad()
     def simulate(self, batch, mode):
@@ -145,3 +182,15 @@ class MetabolicWorldModel(nn.Module):
         self.eval()
         try: return self(batch, mode)
         finally: self.train(was_training)
+
+
+class RankingHead(nn.Module):
+    def __init__(self, dimension, heads, layers):
+        super().__init__()
+        self.projections = nn.ModuleDict({mode:nn.Linear(dimension*(2 if mode == 'joint' else 1), dimension) for mode in ('diet', 'exercise', 'joint')})
+        self.backbone = transformer_encoder(dimension, heads, layers, 0.)
+        self.score = nn.Sequential(nn.Linear(dimension, dimension), nn.GELU(), nn.Linear(dimension, 1), nn.Sigmoid())
+
+    def forward(self, trajectory, mode):
+        tokens = self.projections[mode](trajectory)
+        return self.score(self.backbone(tokens, mask=causal_mask(tokens.size(1), tokens.device)).mean(1)).squeeze(-1)

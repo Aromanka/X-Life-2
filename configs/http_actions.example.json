@@ -1,0 +1,7 @@
+{
+  "model": {
+    "dimension": 64, "basis_dim": 64, "heads": 4, "layers": 2, "patch_size": 6,
+    "action_latent_dimension": 128, "action_backend_id": "random-latent-v1"
+  },
+  "training": {"learning_rate": 0.0001}
+}
