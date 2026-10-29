@@ -35,7 +35,7 @@ accelerate launch 'world_model+ranking_module/train_action_encoder.py' \
   --backend-id qwen25vl-actions-sft-v1
 ```
 
-产物包含 VLM、processor 和 action_factors.pt。加载时必须提供经过该训练入口生成的对应域产物；不会用通用聊天模型或随机 latent 替代。
+产物包含 VLM、processor 和 action_factors.pt。论文路径使用对应域的微调产物。没有 action_factors.pt 的原始 Qwen 目录走预训练模型测试路径：生成 JSON 生理因素，不使用随机初始化的 factor head，并标记 test_backend。
 
 ## 世界模型与推理
 
@@ -61,3 +61,16 @@ python 'world_model+ranking_module/train.py' --data ../data/xlife_cleaned_0207.j
 `POST /v1/action/factors` 接受 domain/text/images，返回 factors/backend_id，运动另返回 intensity_scale=MET。本地投影按固定单位缩放因素后生成 q，再叠加现有 onset 正弦编码。动作缺席时不请求 VLM，返回零动作向量。
 
 默认数值模式仍可用于已有数值 checkpoint；旧 HTTP latent checkpoint 与新因素投影不兼容，需要重新训练。mock 服务仅返回标记为 test_backend 的固定因素，用于接口测试。
+
+## 原始模型测试
+
+当前 exp.sh 不微调大模型，使用 configs/pretrained_actions.json，仅训练本地投影与世界模型。metadata、饮食和运动角色均指向原始 Qwen2.5-VL 目录；从项目根目录启动服务：
+
+```bash
+python -u extra_code/server.py --backend api --device cuda \
+  --metadata-model /data/home/wanglidi/code/model/Qwen2.5vl \
+  --diet-encoder /data/home/wanglidi/code/model/Qwen2.5vl \
+  --exercise-encoder /data/home/wanglidi/code/model/Qwen2.5vl
+```
+
+另一个终端执行 bash exp.sh。无需先生成微调编码器目录，训练过程不调用处方生成或安全审查 API。原始模型通过确定性解码生成定长因素数组，单位和顺序与微调路径相同；模型输出格式错误、缺失数量或非法数值时明确报错，不填充随机值。该路径只用于当前测试，不代表已完成论文的动作编码器监督微调。

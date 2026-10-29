@@ -59,3 +59,17 @@ class ActionVLM(nn.Module):
         path = Path(path); path.mkdir(parents=True, exist_ok=True)
         self.vlm.save_pretrained(path); self.processor.save_pretrained(path)
         torch.save(dict(domain=self.domain, backend_id=backend_id, factor_head=self.factor_head.state_dict()), path/'action_factors.pt')
+
+    @torch.inference_mode()
+    def generate_factors(self, text, images=()):
+        fields = 'carbohydrate_g, protein_g, fat_g, fiber_g, mass_g, energy_kcal' if self.domain == 'diet' else 'duration_min, energy_kcal, intensity_MET'
+        text += '\nReturn only JSON {"factors":[numbers]} in this order: ' + fields + '. Use finite nonnegative numbers. Preserve supplied quantities; estimate unspecified quantities from the action. No prose.'
+        inputs, _ = self.inputs(text, images)
+        inputs = {k:v.to(self.vlm.device) for k,v in inputs.items()}
+        generated = self.vlm.generate(**inputs, max_new_tokens=256, do_sample=False)
+        answer = self.processor.batch_decode(generated[:, inputs['input_ids'].size(1):], skip_special_tokens=True)[0].strip()
+        if answer.startswith('```'): answer = answer.split('\n',1)[1].rsplit('```',1)[0].strip()
+        factors = json.loads(answer)['factors']
+        if not isinstance(factors,list) or len(factors) != (6 if self.domain == 'diet' else 3): raise ValueError('Invalid generated action factor count')
+        if any(isinstance(v,bool) or not isinstance(v,(int,float)) for v in factors): raise ValueError('Generated action factors must be numbers')
+        return torch.tensor(factors, device=self.vlm.device, dtype=torch.float32)

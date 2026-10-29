@@ -28,6 +28,19 @@ class ActionEncoderTests(unittest.TestCase):
         with patch('backends.action_encoder.HTTPBackend.call') as call:
             self.assertEqual(encoder(['']).abs().sum(), 0); call.assert_not_called()
 
+    def test_pretrained_factor_generation(self):
+        model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
+        model.domain = 'exercise'
+        model.vlm = SimpleNamespace(device='cpu', generate=lambda **kwargs:torch.tensor([[1,2,3,4]]))
+        model.processor = SimpleNamespace(batch_decode=lambda *args, **kwargs:['```json\n{"factors":[20,70,3]}\n```'])
+        with patch.object(model,'inputs',return_value=({'input_ids':torch.tensor([[1,2]])},None)) as inputs:
+            factors = model.generate_factors('walking')
+        torch.testing.assert_close(factors,torch.tensor([20.,70.,3.]))
+        self.assertIn('intensity_MET',inputs.call_args.args[0])
+        model.processor.batch_decode = lambda *args, **kwargs:['{"factors":[20,null,3]}']
+        with patch.object(model,'inputs',return_value=({'input_ids':torch.tensor([[1,2]])},None)):
+            with self.assertRaises(ValueError): model.generate_factors('walking')
+
     def test_reject_wrong_artifact_and_scale(self):
         encoder = HTTPActionEncoder('exercise', 8, 'other')
         with patch('backends.action_encoder.HTTPBackend.call', side_effect=self.response):
