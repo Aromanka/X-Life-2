@@ -109,7 +109,7 @@ def run(args):
                     if not torch.isfinite(p).all(): raise ValueError('Nonfinite evaluation')
                     predictions.append(dict(mode=row['mode'],predicted=p.tolist(),observed=row['target'].tolist(),mask=row['target_mask'].tolist(),
                         last_observed=float(row['history'][row['history_mask']][-1]),history_points=int(row['history_mask'].sum()),
-                        metadata_complete=bool(torch.isfinite(row['metadata']).all()),action_complete=bool(torch.isfinite(row[row['mode']]).all())))
+                        metadata_complete=bool(row['metadata']['fields']) and all(f['value'] is not None for f in row['metadata']['fields']),action_complete=bool(torch.isfinite(row[row['mode']]).all())))
                 reports[split]=stratified(predictions)
             output=Path(args.output)/f'seed_{seed}'/kind;output.mkdir(parents=True,exist_ok=True)
             result=dict(seed=seed,model=kind,action_correction=args.action_correction,protocol='participant80_unseen20_purged_seen_holdout',

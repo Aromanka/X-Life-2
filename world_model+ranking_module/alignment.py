@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 from train_data import read_records, ReplayPairs
+from dataset_metadata import prepare_metadata
 
 
 MODES = ('diet', 'exercise', 'joint')
@@ -19,11 +20,11 @@ def candidate(context, action, vocabulary):
     if set(action) - {'mode', 'diet', 'exercise', 'exercise_type', 'onset', 'diet_text', 'exercise_text', 'diet_images'}: raise ValueError('Candidates may contain actions only, never context or future labels')
     mode = action['mode']
     if mode not in MODES: raise ValueError('Unknown candidate mode')
-    sample = {key:torch.tensor([float('nan') if v is None else v for v in context[key]], dtype=torch.float32) for key in ('history', 'metadata')}
-    if torch.isinf(sample['metadata']).any(): raise ValueError('Invalid metadata')
+    sample = {'history':torch.tensor([float('nan') if v is None else v for v in context['history']], dtype=torch.float32),
+              'metadata':prepare_metadata(context['metadata'])}
     if any(value not in (True, False, 0, 1) for value in context['history_mask']): raise ValueError('Invalid history mask')
     sample['history_mask'] = torch.tensor(context['history_mask'], dtype=torch.bool)
-    if sample['history'].shape != (36,) or sample['history_mask'].shape != (36,) or sample['metadata'].shape != (84,): raise ValueError('Expected 36 history points and 84 metadata values')
+    if sample['history'].shape != (36,) or sample['history_mask'].shape != (36,): raise ValueError('Expected 36 history points')
     if not sample['history_mask'].any() or not torch.isfinite(sample['history'][sample['history_mask']]).all(): raise ValueError('Measured history must be finite and nonempty')
     sample['history'] = sample['history'].masked_fill(~sample['history_mask'], 0.)
     for name, size in (('diet', 6), ('exercise', 3)):
@@ -158,6 +159,7 @@ def run_alignment(args, model, checkpoint, config, output):
         entry = dict(epoch=epoch+1, step=step, loss=total/count, pairs=count, replay_pairs=replay_seen, replay_fraction=replay_seen/count, validation_accuracy=correct/valid_count if valid_count else None)
         history.append(entry); print(json.dumps(entry))
         state = dict(checkpoint)
+        state['test_backend'] = model.metadata_encoder.test_backend or checkpoint.get('test_backend', False)
         state.update(ranking_version=1, phase=args.phase, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), reference_state_dict=reference.state_dict(), reference_parent=checkpoint.get('reference_parent') if args.resume else args.init_checkpoint, parent=args.resume or args.init_checkpoint, alignment=alignment, config=config, epoch=epoch+1, global_step=step, history=history, data=str(Path(args.data).resolve()), rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None)
         torch.save(state, output/'checkpoint.pt')
         (output/'history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')

@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 import json
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch
 import torch
+from test_metadata import encoded_metadata
 from dataset import cgm_window
 from world_model import MetabolicWorldModel, llm_actions_enabled
 from train import evaluate, split_samples, temporal_overlap, curve_metrics, main
@@ -16,7 +18,8 @@ class NumericTests(unittest.TestCase):
         torch.set_num_threads(2)
         torch.manual_seed(1)
         self.model = MetabolicWorldModel(dimension=16, basis_dim=8, heads=2, layers=1)
-        self.batch = dict(history=torch.arange(36).float()[None]/10+5, history_mask=torch.ones(1,36,dtype=torch.bool), metadata=torch.zeros(1,84), diet=torch.ones(1,6), exercise=torch.ones(1,3), type_id=torch.zeros(1,dtype=torch.long), onset=torch.tensor([[60.,0.]]))
+        self.batch = dict(history=torch.arange(36).float()[None]/10+5, history_mask=torch.ones(1,36,dtype=torch.bool), metadata=[encoded_metadata()], diet=torch.ones(1,6), exercise=torch.ones(1,3), type_id=torch.zeros(1,dtype=torch.long), onset=torch.tensor([[60.,0.]]))
+        self.model.initial_states(self.batch)
 
     def test_time_grid(self):
         origin = datetime.fromisoformat('2025-01-01T12:00:00')
@@ -39,7 +42,7 @@ class NumericTests(unittest.TestCase):
 
     def test_freeze_and_reload(self):
         self.model.initialize_fusion(); self.model.configure_phase('fusion')
-        before = {k:v.clone() for k,v in self.model.state_dict().items()}
+        before = deepcopy(self.model.state_dict())
         optim = torch.optim.AdamW([p for p in self.model.parameters() if p.requires_grad],lr=.001)
         self.model(self.batch,'joint',horizon=3)['predicted_cgm'].square().mean().backward(); optim.step()
         for name, parameter in self.model.named_parameters():
@@ -105,7 +108,7 @@ class NumericTests(unittest.TestCase):
             def __len__(self): return len(self.samples)
         dataset = Rows(); dataset.samples = []
         for i,hour in enumerate((8,10,12,14)):
-            row = {key:value[0].clone() for key,value in self.batch.items()}
+            row = {key:deepcopy(value[0]) for key,value in self.batch.items()}
             row.update(subject_id='a',origin=f'2025-01-01T{hour:02}:00:00',mode='diet' if i%2==0 else 'exercise',joint=True,exercise_type='',diet_text='',exercise_text='',target=torch.ones(36)*6,target_mask=torch.ones(36,dtype=torch.bool))
             dataset.samples.append(row)
         with tempfile.TemporaryDirectory() as directory:

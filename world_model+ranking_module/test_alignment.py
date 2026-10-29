@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 import torch
+from test_metadata import encoded_metadata
 from alignment import NumericPreferencePairs, FrozenRankingReference, preference_objective, batch_candidates
 from train import main
 from world_model import MetabolicWorldModel
@@ -15,8 +16,9 @@ class AlignmentTests(unittest.TestCase):
         torch.set_num_threads(2); torch.manual_seed(3)
         self.config = dict(dimension=16, basis_dim=8, heads=2, layers=1)
         self.model = MetabolicWorldModel(**self.config)
-        self.context = dict(history=[5.+i/100 for i in range(36)], history_mask=[True]*36, metadata=[0.]*84, subject_id='test', origin='2025-01-01T12:00:00')
+        self.context = dict(history=[5.+i/100 for i in range(36)], history_mask=[True]*36, metadata=encoded_metadata(), subject_id='test', origin='2025-01-01T12:00:00')
         self.action = dict(mode='diet', diet=[1.]*6, exercise=[2.]*3, onset=[0.,0.])
+        self.model.metadata_encoder([self.context['metadata']])
         self.row = dict(state_id='s1', split='train', context=self.context, preferred=self.action, rejected={**self.action, 'diet':[10.]*6})
 
     def test_score_direction_reference_and_frozen_predictions(self):
@@ -24,7 +26,7 @@ class AlignmentTests(unittest.TestCase):
         self.model.configure_phase('professional'); self.model.eval()
         reference = FrozenRankingReference(self.model)
         batch = batch_candidates([pairs[0]['preferred']], 'cpu')
-        before = {k:v.clone() for k,v in self.model.state_dict().items()}
+        before = deepcopy(self.model.state_dict())
         predictions = {m:self.model.simulate(batch,m)['predicted_cgm'] for m in ('diet','exercise','joint')}
         trajectory = self.model(batch,'diet')['trajectory']
         ref_score = reference(trajectory,'diet').clone()
@@ -38,7 +40,8 @@ class AlignmentTests(unittest.TestCase):
         torch.testing.assert_close(reference(trajectory,'diet'),ref_score,rtol=0,atol=0)
         self.assertTrue(all(p.grad is None for p in reference.parameters()))
         for key,value in self.model.state_dict().items():
-            if not key.startswith('ranking_head.'): torch.testing.assert_close(value,before[key],rtol=0,atol=0)
+            if key.endswith('_extra_state'): self.assertEqual(value,before[key])
+            elif not key.startswith('ranking_head.'): torch.testing.assert_close(value,before[key],rtol=0,atol=0)
         for mode in predictions:
             result = self.model.simulate(batch,mode)
             torch.testing.assert_close(result['predicted_cgm'],predictions[mode],rtol=0,atol=0)
@@ -47,7 +50,7 @@ class AlignmentTests(unittest.TestCase):
     def test_data_guards(self):
         invalid = deepcopy(self.row); invalid['rejected']['target'] = [6.]*36
         with self.assertRaises(ValueError): NumericPreferencePairs([invalid],{},'professional')
-        invalid = deepcopy(self.row); invalid['preferred']['metadata'] = [0.]*84
+        invalid = deepcopy(self.row); invalid['preferred']['metadata'] = {'unexpected':'context'}
         with self.assertRaises(ValueError): NumericPreferencePairs([invalid],{},'professional')
         with self.assertRaises(ValueError): NumericPreferencePairs([self.row],{},'physiological')
         invalid = deepcopy(self.row); invalid.update(split='validation',state_id='alias')
@@ -97,7 +100,8 @@ class AlignmentTests(unittest.TestCase):
             self.assertEqual(resumed['epoch'],2)
             for key,value in first['reference_state_dict'].items(): torch.testing.assert_close(value,resumed['reference_state_dict'][key],rtol=0,atol=0)
             for key,value in resumed['model_state_dict'].items():
-                if not key.startswith('ranking_head.') and key != 'ranked_modes': torch.testing.assert_close(value,self.model.state_dict()[key],rtol=0,atol=0)
+                if key.endswith('_extra_state'): self.assertEqual(value,self.model.state_dict()[key])
+                elif not key.startswith('ranking_head.') and key != 'ranked_modes': torch.testing.assert_close(value,self.model.state_dict()[key],rtol=0,atol=0)
             candidates = root/'candidates.json'; candidates.write_text(json.dumps([dict(state_id='rank',context=self.context,candidates=[r['preferred'] for r in rows])]))
             main(base+['--rank-only','--data',str(candidates),'--init-checkpoint',str(phy/'checkpoint.pt'),'--output',str(root/'rank')])
             result = json.loads((root/'rank/rankings.json').read_text())[0]

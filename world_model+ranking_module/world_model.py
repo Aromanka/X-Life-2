@@ -3,6 +3,7 @@ import os
 import torch
 from torch import nn
 from model import CGMTransformerEncoder, transformer_encoder, causal_mask
+from backends.metadata_encoder import SemanticMetadataEncoder
 
 
 def llm_actions_enabled():
@@ -57,7 +58,7 @@ class MetabolicWorldModel(nn.Module):
             raise ValueError('Local language-model paths are retired; configure the external HTTP role service')
         self.dimension, self.llm_actions = dimension, llm_actions_enabled()
         self.diet_encoder, self.exercise_encoder = NumericEncoder(6, dimension), NumericEncoder(3, dimension)
-        self.metadata_encoder = NumericEncoder(84, dimension)
+        self.metadata_encoder = SemanticMetadataEncoder(dimension)
         self.type_embedding = nn.Embedding(128, dimension)
         self.cgm_encoder = CGMTransformerEncoder(d_model=dimension, nhead=heads, num_layers=layers, dropout=0., patch_size=patch_size)
         self.state_projection = nn.Sequential(nn.Linear(3*dimension+2, dimension), nn.GELU(), nn.Linear(dimension, dimension))
@@ -82,8 +83,9 @@ class MetabolicWorldModel(nn.Module):
         self.register_buffer('ranked_modes', torch.zeros(3, dtype=torch.bool))
 
     def fit(self, samples):
-        for name in ('diet', 'exercise', 'metadata'):
+        for name in ('diet', 'exercise'):
             getattr(self, name+'_encoder').fit(torch.stack([s[name] for s in samples]))
+        with torch.no_grad(): self.metadata_encoder([samples[0]['metadata']])
         observed = torch.cat([s['history'][s['history_mask']] for s in samples])
         self.glucose_mean.copy_(observed.mean()); self.glucose_scale.copy_(observed.std(unbiased=False).clamp_min(1e-3))
 
@@ -122,10 +124,11 @@ class MetabolicWorldModel(nn.Module):
 
     def configure_phase(self, phase):
         if phase not in {'single', 'fusion', 'professional', 'physiological'}: raise ValueError('Invalid training phase')
-        self.requires_grad_(False)
+        for parameter in self.parameters(): parameter.requires_grad = False
         if phase in {'single', 'fusion'}: self.ranked_modes.zero_()
         names = ('diet_encoder', 'exercise_encoder', 'type_embedding', 'metadata_encoder', 'cgm_encoder', 'state_projection', 'diet', 'exercise') if phase == 'single' else ('fusion', 'gate') if phase == 'fusion' else ('ranking_head',)
-        for name in names: getattr(self, name).requires_grad_(True)
+        for name in names:
+            for parameter in getattr(self, name).parameters(): parameter.requires_grad = True
         if phase == 'fusion':
             self.diet.conditioning.requires_grad_(True); self.exercise.conditioning.requires_grad_(True)
         if self.llm_actions and phase == 'single':
@@ -169,6 +172,7 @@ class MetabolicWorldModel(nn.Module):
         return scores
 
     def load_checkpoint(self, checkpoint):
+        if 'metadata_encoder.mean' in checkpoint['model_state_dict']: raise ValueError('Numeric metadata checkpoints require retraining with semantic metadata')
         if checkpoint.get('ranking_version') == 1: return self.load_state_dict(checkpoint['model_state_dict'])
         state = checkpoint['model_state_dict']
         missing = set(self.state_dict()) - set(state)

@@ -6,6 +6,7 @@ import torch
 from torch.utils.data import Dataset
 from datetime import datetime
 from pathlib import Path
+from dataset_metadata import prepare_metadata
 
 
 def numeric_value(value):
@@ -40,8 +41,12 @@ class XLifeCleanedDataset(Dataset):
         self.root = Path(path).resolve().parent
         self.samples, self.skipped = [], 0
         for patient in patients[:max_subjects]:
+            start = len(self.samples)
             for row in patient.get('meals', []): self.add_record(patient, row)
             for row in patient.get('exercise_events', []): self.add_record(patient, row, True)
+            if len(self.samples) > start:
+                metadata = prepare_metadata(patient.get('metadata', {}))
+                for sample in self.samples[start:]: sample['metadata'] = metadata
         if max_samples:
             groups = [[s for s in self.samples if s['mode'] == mode] for mode in ('diet', 'exercise')]
             self.samples = [g[i] for i in range(max(map(len, groups))) for g in groups if i < len(g)][:max_samples]
@@ -69,16 +74,11 @@ class XLifeCleanedDataset(Dataset):
                 totals.append(value)
             diet.append(sum(totals) if totals and all(math.isfinite(v) for v in totals) else float('nan'))
         exer = [numeric_value(exercise.get('duration_min', exercise.get('duration'))), numeric_value(exercise.get('energy_cal', exercise.get('calories'))), numeric_value(exercise.get('intensity'))]
-        metadata = patient.get('metadata') or {}
-        meta = []
-        for key, length in (('physical', 7), ('blood', 77)):
-            source = metadata.get(key) or []
-            meta.extend([numeric_value(source[i]) if i < len(source) else float('nan') for i in range(length)])
         meal_time = event_timestamp(food.get('date', ''), details.get('time'))
         exercise_time = event_timestamp(exercise.get('date', ''), exercise.get('start_time') or exercise.get('recorded_at'))
         joint = bool(is_exercise and meal_time and exercise_time and meal_time <= origin and any(math.isfinite(v) for v in diet))
         if not any(math.isfinite(v) for v in (exer if is_exercise else diet)): self.skipped += 1; return
-        self.samples.append(dict(subject_id=str(patient['subject_id']), origin=origin.isoformat(), mode='exercise' if is_exercise else 'diet', joint=joint, diet=torch.tensor(diet), exercise=torch.tensor(exer), metadata=torch.tensor(meta), exercise_type=str(exercise.get('type') or ''), onset=torch.tensor([(origin-meal_time).total_seconds()/60 if meal_time else 0., (origin-exercise_time).total_seconds()/60 if exercise_time else 0.]), history=history, history_mask=history_mask, target=target, target_mask=target_mask, diet_text=json.dumps(details, ensure_ascii=False), exercise_text=json.dumps(exercise, ensure_ascii=False)))
+        self.samples.append(dict(subject_id=str(patient['subject_id']), origin=origin.isoformat(), mode='exercise' if is_exercise else 'diet', joint=joint, diet=torch.tensor(diet), exercise=torch.tensor(exer), metadata=None, exercise_type=str(exercise.get('type') or ''), onset=torch.tensor([(origin-meal_time).total_seconds()/60 if meal_time else 0., (origin-exercise_time).total_seconds()/60 if exercise_time else 0.]), history=history, history_mask=history_mask, target=target, target_mask=target_mask, diet_text=json.dumps(details, ensure_ascii=False), exercise_text=json.dumps(exercise, ensure_ascii=False)))
 
         images = details.get('images', [])
         if not isinstance(images, list) or not all(isinstance(p, str) for p in images): raise ValueError('Meal images must be a list of paths')

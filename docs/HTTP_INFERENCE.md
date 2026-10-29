@@ -1,6 +1,6 @@
 # HTTP inference contract
 
-POST JSON to `XLIFE_LLM_URL/v1/{role}` (default localhost:8765). Roles: `candidate/prepare`, `safety/evaluate`, `generate`, `safety`, `action/explicit`, `action/factors`, `embed`, `knowledge/extract`, `teacher`. Prescription prompts and upstream model selection belong to sibling `extra_code`. Action encoder training and its input instructions live in `action_vlm.py`. Importing the client performs no I/O.
+POST JSON to `XLIFE_LLM_URL/v1/{role}` (default localhost:8765). Roles: `candidate/prepare`, `safety/evaluate`, `generate`, `safety`, `action/explicit`, `action/factors`, `metadata/encode`, `embed`, `knowledge/extract`, `teacher`. Prescription prompts and upstream model selection belong to sibling `extra_code`. Action encoder training and its input instructions live in `action_vlm.py`. Importing the client performs no I/O.
 
 Response envelope: `{"result":...,"provenance":{"role":...,"backend":...,"test_backend":boolean}}`. Backend failures do not silently produce mock success.
 
@@ -48,3 +48,5 @@ Generated counterfactual actions have no observed future outcome, so the demonst
 `POST /v1/safety/evaluate` accepts candidate/context/simulation/constraints/knowledge and returns the final is_safe decision, audit checks, vetoes and review provenance. All deterministic and semantic review behavior belongs to extra_code/services/safety. The existing `safety` role is an internal semantic-review operation used by that external service. X-Life-2/safety is a request wrapper only. Transport failures are recorded as safety_failed by the pipeline.
 
 The numerical world model, checkpoint compatibility and tensor conversion remain local. They do not implement prescription policy. Tests of prescription rules and API shapes now live under extra_code; run `python -m unittest discover -s extra_code -p 'test_*.py'` from the workspace root.
+
+Metadata encoding uses POST /v1/metadata/encode with canonical fields. It returns embedding/backend_id in the standard envelope. Qwen3 is frozen; the local alignment layer infers width. See METADATA.md for the shared dataset interface and checkpoint changes.

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import torch
+from test_metadata import encoded_metadata
 from torch import nn
 from action_vlm import ActionVLM
 from backends.action_encoder import HTTPActionEncoder
@@ -70,7 +71,7 @@ class ActionEncoderTests(unittest.TestCase):
         torch.set_num_threads(1)
         with patch.dict(os.environ, {'XLIFE_USE_LLM_ACTION_ENCODERS':'1'}), patch('backends.action_encoder.HTTPBackend.call', side_effect=self.response):
             model = MetabolicWorldModel(dimension=8,basis_dim=4,heads=2,layers=1,action_backend_id='sft')
-            context = dict(history=[5.]*36,history_mask=[True]*36,metadata=[0.]*84,subject_id='s',origin='2025-01-01T12:00:00')
+            context = dict(history=[5.]*36,history_mask=[True]*36,metadata=encoded_metadata(),subject_id='s',origin='2025-01-01T12:00:00')
             action = dict(mode='diet',diet=[1.]*6,onset=[0,0],diet_images=['meal.jpg'])
             sample = candidate(context, action, {})
             batch = batch_candidates([sample], 'cpu')

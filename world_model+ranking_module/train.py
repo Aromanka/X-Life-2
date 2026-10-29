@@ -10,7 +10,8 @@ from world_model import MetabolicWorldModel, llm_actions_enabled
 
 
 def collate(rows, vocabulary):
-    batch = {key: torch.stack([row[key] for row in rows]) for key in ('diet', 'exercise', 'metadata', 'onset', 'history', 'history_mask', 'target', 'target_mask')}
+    batch = {key: torch.stack([row[key] for row in rows]) for key in ('diet', 'exercise', 'onset', 'history', 'history_mask', 'target', 'target_mask')}
+    batch['metadata'] = [row['metadata'] for row in rows]
     batch['type_id'] = torch.tensor([vocabulary.get(row['exercise_type'], 0) for row in rows])
     for key in ('diet_text', 'exercise_text', 'subject_id', 'origin'): batch[key] = [row[key] for row in rows]
     batch['diet_images'] = [row.get('diet_images', []) for row in rows]
@@ -215,7 +216,7 @@ def main(argv=None):
         history.append(entry); print(json.dumps(entry))
         state = dict(architecture_version=3, schema_version=1, phase=args.phase, trained_domains=sorted(trained_domains), model_config=model_config, llm_actions=model.llm_actions, model_state_dict=model.state_dict(), optimizer=optimizer.state_dict(), splits=splits, vocabulary=vocabulary, epoch=epoch+1, global_step=global_step, history=history, rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None, parent=checkpoint_path, data=str(Path(args.data).resolve()), config=config)
         state.update(ranking_version=1,split_strategy=strategy,scheduler=scheduler.state_dict(),best_mae=best_mae,bad_epochs=bad_epochs)
-        state['test_backend'] = bool(model.llm_actions and (model.diet_vlm.test_backend or model.exercise_vlm.test_backend))
+        state['test_backend'] = model.metadata_encoder.test_backend or bool(model.llm_actions and (model.diet_vlm.test_backend or model.exercise_vlm.test_backend))
         torch.save(state, output/'checkpoint.pt')
         if improved: torch.save(state,output/'best.pt')
         (output/'history.json').write_text(json.dumps(history, allow_nan=False), encoding='utf-8')

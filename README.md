@@ -2,6 +2,8 @@
 
 当前维护主线是 v3 数值动作世界模型：独立饮食/运动残差动力学、三路门控融合、并列生理预测和独立排序头，以及 HTTP 知识生成与安全审查。
 
+Metadata 统一使用 Qwen3-32B 语义编码后对齐 CGM 特征，自动解析嵌套字段与变长数组。数据接口、服务启动和 checkpoint 兼容性见 [Metadata 编码](docs/METADATA.md)。训练前需要启动该服务，或提供已编码 metadata；原数值 metadata checkpoint 需要重新训练。
+
 在 X-Life-2 目录安装唯一依赖清单：`pip install -r requirements.txt`。
 
 ## 离线推理

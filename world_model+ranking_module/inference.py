@@ -16,6 +16,7 @@ from generation import prepare
 from knowledge import KnowledgeGraph
 from safety import assess
 from world_model import MetabolicWorldModel, llm_actions_enabled
+from dataset_metadata import prepare_metadata
 
 
 def finite_json(value):
@@ -34,13 +35,14 @@ def masked_context(sample):
 def model_candidate(context,action,vocabulary):
     """Tensor serialization of remotely prepared inputs, without prescription policy."""
     sample={key:torch.tensor([float('nan') if v is None else v for v in values],dtype=torch.float32)
-            for key,values in {**{k:context[k] for k in ('history','metadata')},
+            for key,values in {**{k:context[k] for k in ('history',)},
                                **{k:action[k] for k in ('diet','exercise','onset')}}.items()}
     sample['history_mask']=torch.tensor(context['history_mask'],dtype=torch.bool)
     sample['history']=sample['history'].masked_fill(~sample['history_mask'],0.)
     sample['type_id']=torch.tensor(vocabulary.get(action.get('exercise_type',''),0))
     for key in ('diet_text','exercise_text'): sample[key]=action.get(key,'')
     sample['diet_images'] = action.get('diet_images', [])
+    sample['metadata'] = prepare_metadata(context['metadata'])
     return sample
 
 
@@ -152,6 +154,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
         output['test_only'] |= row['assessment']['provenance']['test_backend']
     if model.llm_actions:
         output['test_only'] |= model.diet_vlm.test_backend or model.exercise_vlm.test_backend
+    output['test_only'] |= model.metadata_encoder.test_backend
     output['method_status'] = 'test_substitutes' if output['test_only'] else 'knowledge_missing' if not graph.triples else 'configured_backends'
     output['top_plans'] = sorted([r for r in output['candidates'] if r['status']=='safe'],
                                 key=lambda r:r['ranking_score'],reverse=True)[:top_k]

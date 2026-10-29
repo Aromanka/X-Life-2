@@ -42,6 +42,7 @@ def main():
             loss = model(inputs, mask.to(accelerator.device), factors)['loss']
             if not torch.isfinite(loss): raise FloatingPointError('Nonfinite action supervision loss')
             accelerator.backward(loss); accelerator.clip_grad_norm_(model.parameters(), 1.); optimizer.step()
+            accelerator.print({'domain':args.domain, 'loss':float(loss.detach())})
     accelerator.wait_for_everyone()
     if accelerator.is_main_process: accelerator.unwrap_model(model).save(args.output, args.backend_id)
 
