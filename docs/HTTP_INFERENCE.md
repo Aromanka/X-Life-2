@@ -1,6 +1,6 @@
 # HTTP inference contract
 
-POST JSON to `XLIFE_LLM_URL/v1/{role}` (default localhost:8765). Roles: `candidate/prepare`, `safety/evaluate`, `generate`, `safety`, `action/explicit`, `action/latent`, `embed`, `knowledge/extract`, `teacher`. Prompts and upstream model selection belong to sibling `extra_code` only. Importing the client performs no I/O.
+POST JSON to `XLIFE_LLM_URL/v1/{role}` (default localhost:8765). Roles: `candidate/prepare`, `safety/evaluate`, `generate`, `safety`, `action/explicit`, `action/factors`, `embed`, `knowledge/extract`, `teacher`. Prescription prompts and upstream model selection belong to sibling `extra_code`. Action encoder training and its input instructions live in `action_vlm.py`. Importing the client performs no I/O.
 
 Response envelope: `{"result":...,"provenance":{"role":...,"backend":...,"test_backend":boolean}}`. Backend failures do not silently produce mock success.
 
@@ -31,7 +31,7 @@ Generation returns `{"candidates":[...]}`. Safety returns `{"is_safe":boolean,"r
 
 Constraints support `allergies`, `conditions`, `forbidden_exercise_types`, `max_carbs_g`, `max_energy_kcal`, `max_duration_min`, `min_exercise_delay_min`. Optional `glucose_unit` and `predicted_glucose_bounds={"unit":...,"min":...,"max":...}` require caller-verified matching units. No new clinical thresholds or unnamed clinical-array meanings are assumed.
 
-`action/explicit` accepts text/structured action and returns `{"action":candidate}`. `action/latent` accepts domain/text/dimension and returns vector/backend_id. The local projection belongs to the checkpoint. Random latent output is request-deterministic and marked test-only; real latent pooling runs server-local hidden-state extraction and requires the exact hidden dimension. Chat completion text does not substitute hidden states.
+`action/explicit` accepts text/structured action and returns `{"action":candidate}`. `action/factors` accepts domain/text/images and returns factors/backend_id; exercise additionally returns intensity_scale=MET. Separately fine-tuned Qwen2.5-VL models mean-pool input hidden states and predict structured physiological factors. The local projection consumes only these factors. See ACTION_ENCODERS.md for full-parameter supervision and image inputs. The former action/latent endpoint is retired; old HTTP checkpoints require retraining.
 
 ## Knowledge and task extensions
 

@@ -40,6 +40,7 @@ def model_candidate(context,action,vocabulary):
     sample['history']=sample['history'].masked_fill(~sample['history_mask'],0.)
     sample['type_id']=torch.tensor(vocabulary.get(action.get('exercise_type',''),0))
     for key in ('diet_text','exercise_text'): sample[key]=action.get(key,'')
+    sample['diet_images'] = action.get('diet_images', [])
     return sample
 
 

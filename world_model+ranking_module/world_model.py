@@ -51,7 +51,7 @@ class Transition(nn.Module):
 class MetabolicWorldModel(nn.Module):
     """Residual diet, exercise and gated joint dynamics."""
     def __init__(self, dimension=128, basis_dim=128, heads=4, layers=2, patch_size=6, diet_model_path=None, exercise_model_path=None,
-                 action_latent_dimension=128, action_backend_id=None, state_pooling="both", gap_feature=True, readout="direct"):
+                 action_backend_id=None, state_pooling="both", gap_feature=True, readout="direct"):
         super().__init__()
         if diet_model_path or exercise_model_path:
             raise ValueError('Local language-model paths are retired; configure the external HTTP role service')
@@ -76,8 +76,8 @@ class MetabolicWorldModel(nn.Module):
         if self.llm_actions:
             if not action_backend_id: raise ValueError('Configure action_backend_id for HTTP action encoders')
             from backends.action_encoder import HTTPActionEncoder
-            self.diet_vlm = HTTPActionEncoder('diet', dimension, action_latent_dimension, action_backend_id)
-            self.exercise_vlm = HTTPActionEncoder('exercise', dimension, action_latent_dimension, action_backend_id)
+            self.diet_vlm = HTTPActionEncoder('diet', dimension, action_backend_id)
+            self.exercise_vlm = HTTPActionEncoder('exercise', dimension, action_backend_id)
         self.ranking_head = RankingHead(dimension, heads, layers)
         self.register_buffer('ranked_modes', torch.zeros(3, dtype=torch.bool))
 
@@ -108,7 +108,7 @@ class MetabolicWorldModel(nn.Module):
         gap = (history.size(1)-1-last_index)[:, None]/history.size(1) if self.gap_feature else torch.zeros_like(last_index[:,None])
         state = self.state_projection(torch.cat([pooled, recent, self.metadata_encoder(batch['metadata']), ((last-self.glucose_mean)/self.glucose_scale)[:, None], gap], -1))
         if self.llm_actions:
-            diet = self.diet_vlm(batch['diet_text'])
+            diet = self.diet_vlm(batch['diet_text'], batch.get('diet_images'))
             exercise = self.exercise_vlm(batch['exercise_text'])
         else:
             diet = self.diet_encoder(batch['diet'])

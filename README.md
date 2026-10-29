@@ -30,7 +30,7 @@ python 'world_model+ranking_module/inference.py' \
 
 处方处理端口为 `/v1/candidate/prepare`，完整安全评估端口为 `/v1/safety/evaluate`，与其余角色共用服务地址。
 
-HTTP 动作 latent 分支需要 XLIFE_USE_LLM_ACTION_ENCODERS=1、匹配的 action_backend_id/维度及重新训练的投影；不能直接切换数值 checkpoint。详见 [HTTP 契约](docs/HTTP_INFERENCE.md)。
+论文动作编码路径使用全参数微调的 Qwen2.5-VL、末层均值池化、监督生理因素提取和本地动作投影。启用 XLIFE_USE_LLM_ACTION_ENCODERS=1，配置匹配的 action_backend_id 并重新训练世界模型；不能直接切换数值或旧 HTTP latent checkpoint。餐食图片、编码器训练与服务启动见 [动作编码器](docs/ACTION_ENCODERS.md)。
 
 ## 训练与评估
 

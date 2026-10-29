@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from datetime import datetime
+from pathlib import Path
 
 
 def numeric_value(value):
@@ -36,6 +37,7 @@ class XLifeCleanedDataset(Dataset):
     """Numeric action-response records."""
     def __init__(self, path, max_subjects=None, max_samples=None):
         with open(path, encoding='utf-8') as handle: patients = json.load(handle)
+        self.root = Path(path).resolve().parent
         self.samples, self.skipped = [], 0
         for patient in patients[:max_subjects]:
             for row in patient.get('meals', []): self.add_record(patient, row)
@@ -77,6 +79,12 @@ class XLifeCleanedDataset(Dataset):
         joint = bool(is_exercise and meal_time and exercise_time and meal_time <= origin and any(math.isfinite(v) for v in diet))
         if not any(math.isfinite(v) for v in (exer if is_exercise else diet)): self.skipped += 1; return
         self.samples.append(dict(subject_id=str(patient['subject_id']), origin=origin.isoformat(), mode='exercise' if is_exercise else 'diet', joint=joint, diet=torch.tensor(diet), exercise=torch.tensor(exer), metadata=torch.tensor(meta), exercise_type=str(exercise.get('type') or ''), onset=torch.tensor([(origin-meal_time).total_seconds()/60 if meal_time else 0., (origin-exercise_time).total_seconds()/60 if exercise_time else 0.]), history=history, history_mask=history_mask, target=target, target_mask=target_mask, diet_text=json.dumps(details, ensure_ascii=False), exercise_text=json.dumps(exercise, ensure_ascii=False)))
+
+        images = details.get('images', [])
+        if not isinstance(images, list) or not all(isinstance(p, str) for p in images): raise ValueError('Meal images must be a list of paths')
+        self.samples[-1]['diet_images'] = [str((self.root/p).resolve()) for p in images]
+        self.samples[-1]['diet_text'] = json.dumps(details, ensure_ascii=False) if details else ''
+        self.samples[-1]['exercise_text'] = json.dumps(exercise, ensure_ascii=False) if exercise else ''
 
     def __len__(self): return len(self.samples)
     def __getitem__(self, index): return self.samples[index]

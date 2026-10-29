@@ -13,6 +13,7 @@ def collate(rows, vocabulary):
     batch = {key: torch.stack([row[key] for row in rows]) for key in ('diet', 'exercise', 'metadata', 'onset', 'history', 'history_mask', 'target', 'target_mask')}
     batch['type_id'] = torch.tensor([vocabulary.get(row['exercise_type'], 0) for row in rows])
     for key in ('diet_text', 'exercise_text', 'subject_id', 'origin'): batch[key] = [row[key] for row in rows]
+    batch['diet_images'] = [row.get('diet_images', []) for row in rows]
     return batch
 
 

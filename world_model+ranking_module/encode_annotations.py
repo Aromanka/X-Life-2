@@ -8,7 +8,7 @@ from backends.http import HTTPBackend
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',required=True);p.add_argument('--output',required=True);p.add_argument('--backend-url')
-    p.add_argument('--role',choices=['teacher','action/explicit','action/latent'],default='teacher')
+    p.add_argument('--role',choices=['teacher','action/explicit'],default='teacher')
     p.add_argument('--dimension',type=int,default=128)
     args=p.parse_args(argv)
     records=json.loads(Path(args.input).read_text(encoding='utf-8'))

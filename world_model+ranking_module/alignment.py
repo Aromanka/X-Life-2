@@ -16,7 +16,7 @@ MODES = ('diet', 'exercise', 'joint')
 
 def candidate(context, action, vocabulary):
     if set(context) != {'history', 'history_mask', 'metadata', 'subject_id', 'origin'}: raise ValueError('Context requires history, history_mask, metadata, subject_id and origin only')
-    if set(action) - {'mode', 'diet', 'exercise', 'exercise_type', 'onset', 'diet_text', 'exercise_text'}: raise ValueError('Candidates may contain actions only, never context or future labels')
+    if set(action) - {'mode', 'diet', 'exercise', 'exercise_type', 'onset', 'diet_text', 'exercise_text', 'diet_images'}: raise ValueError('Candidates may contain actions only, never context or future labels')
     mode = action['mode']
     if mode not in MODES: raise ValueError('Unknown candidate mode')
     sample = {key:torch.tensor([float('nan') if v is None else v for v in context[key]], dtype=torch.float32) for key in ('history', 'metadata')}
@@ -34,7 +34,9 @@ def candidate(context, action, vocabulary):
     sample['onset'] = torch.tensor(action['onset'], dtype=torch.float32)
     if sample['onset'].shape != (2,) or not torch.isfinite(sample['onset']).all(): raise ValueError('Two finite onset offsets are required')
     sample['type_id'] = torch.tensor(vocabulary.get(action.get('exercise_type', ''), 0))
-    for key in ('diet_text', 'exercise_text'): sample[key] = action.get(key, '')
+    for domain in ('diet', 'exercise'):
+        sample[domain+'_text'] = action.get(domain+'_text') or (json.dumps({domain:action.get(domain), 'type':action.get('exercise_type','') if domain=='exercise' else ''}) if mode in (domain,'joint') else '')
+    sample['diet_images'] = action.get('diet_images', [])
     return sample
 
 
@@ -98,7 +100,6 @@ def preference_objective(model, pairs, reference, beta, device):
 
 
 def run_alignment(args, model, checkpoint, config, output):
-    if model.llm_actions: raise ValueError('Offline numeric alignment currently requires numeric action encoders')
     settings = config.get('alignment', {})
     beta, fraction = float(settings.get('beta', 2.)), float(settings.get('replay_fraction', .25))
     if not math.isfinite(beta) or beta <= 0: raise ValueError('Bounded-score beta must be finite and positive')
