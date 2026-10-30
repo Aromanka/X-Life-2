@@ -1,319 +1,389 @@
 {
   "model": {
-    "dimension": 128,
-    "basis_dim": 128,
-    "heads": 4,
-    "layers": 2,
-    "patch_size": 6,
+    "dimension": null,
+    "basis_dim": null,
+    "heads": null,
+    "layers": null,
+    "patch_size": null,
     "action_backend_id": {
-      "diet": "diet-encoder-v1",
-      "exercise": "exercise-encoder-v1"
+      "diet": null,
+      "exercise": null
     },
-    "state_pooling": "both",
-    "gap_feature": true,
-    "readout": "direct",
-    "dropout": 0,
-    "feedforward": 512,
-    "feedforward_multiplier": 4,
-    "type_capacity": 128,
-    "position_max_length": 5000,
-    "time_encoding_base": 10000,
-    "activation": "gelu"
+    "state_pooling": null,
+    "gap_feature": null,
+    "readout": null,
+    "dropout": null,
+    "feedforward": null,
+    "feedforward_multiplier": null,
+    "type_capacity": null,
+    "position_max_length": null,
+    "time_encoding_base": null,
+    "activation": null
   },
   "data": {
-    "history_steps": 36,
-    "horizon_steps": 36,
-    "interval_minutes": 5,
-    "train_fraction": 0.8,
-    "validation_fraction": 0.1,
-    "within_subject_train_fraction": 0.5,
+    "history_steps": null,
+    "horizon_steps": null,
+    "interval_minutes": null,
+    "train_fraction": null,
+    "validation_fraction": null,
+    "within_subject_train_fraction": null,
     "metric_horizons_minutes": [
-      30,
-      60,
-      120,
-      180
+      null,
+      null,
+      null,
+      null
     ]
   },
   "training": {
-    "dataset": "xlife_cleaned",
-    "phase": "single",
-    "domain": "both",
-    "split": "test",
-    "split_strategy": "subject",
-    "epochs": 10,
-    "batch_size": 8,
-    "device": "cpu",
-    "seed": 42,
-    "rank_only": false,
-    "predict_only": false,
-    "joint_only": false,
-    "learning_rate": 0.0001,
-    "gradient_clip": 1,
+    "dataset": null,
+    "phase": null,
+    "domain": null,
+    "split": null,
+    "split_strategy": null,
+    "epochs": null,
+    "batch_size": null,
+    "device": null,
+    "seed": null,
+    "rank_only": null,
+    "predict_only": null,
+    "joint_only": null,
+    "learning_rate": null,
+    "gradient_clip": null,
     "scheduler": {
-      "factor": 0.5,
-      "patience": 3,
-      "min_lr": 0.000001
+      "factor": null,
+      "patience": null,
+      "min_lr": null
     },
-    "early_stop_patience": 10,
+    "early_stop_patience": null,
     "optimizer": {
       "betas": [
-        0.9,
-        0.999
+        null,
+        null
       ],
-      "eps": 1e-8,
-      "weight_decay": 0.01
+      "eps": null,
+      "weight_decay": null
     }
   },
   "alignment": {
-    "split": "train",
-    "pair_weight": 1.0,
-    "beta": 2,
-    "replay_fraction": 0.25,
-    "learning_rate": 0.0001,
-    "gradient_clip": 1
+    "split": null,
+    "pair_weight": null,
+    "beta": null,
+    "replay_fraction": null,
+    "learning_rate": null,
+    "gradient_clip": null
   },
   "user_feedback": {
-    "epochs": 3,
-    "batch_size": 8,
-    "learning_rate": 0.0001,
-    "beta": 2,
-    "seed": 42,
-    "device": "cpu",
-    "replay_fraction": 0.25,
-    "gradient_clip": 1
+    "epochs": null,
+    "batch_size": null,
+    "learning_rate": null,
+    "beta": null,
+    "seed": null,
+    "device": null,
+    "replay_fraction": null,
+    "gradient_clip": null
   },
   "inference": {
-    "mode": "diet",
-    "sample_index": 0,
+    "mode": null,
+    "sample_index": null,
     "source_mode": null,
-    "ranking": "learned",
-    "count": 5,
-    "batch_size": 8,
-    "seed": 42,
-    "device": "cpu",
-    "top_k": 3,
-    "extract_actions": false,
-    "num_threads": 1,
+    "ranking": null,
+    "count": null,
+    "batch_size": null,
+    "seed": null,
+    "device": null,
+    "top_k": null,
+    "extract_actions": null,
+    "num_threads": null,
     "requirement": null
   },
   "action_training": {
-    "model": "Qwen/Qwen2.5-VL-72B-Instruct",
-    "epochs": 1,
-    "learning_rate": 0.00001,
-    "batch_size": 1,
-    "gradient_clip": 1
+    "model": null,
+    "epochs": null,
+    "learning_rate": null,
+    "batch_size": null,
+    "gradient_clip": null
   },
   "action_generation": {
-    "attempts": 3,
-    "max_tokens": 512,
-    "do_sample": false
+    "attempts": null,
+    "max_tokens": null,
+    "do_sample": null
   },
   "annotation": {
-    "role": "teacher",
-    "dimension": 128
+    "role": null,
+    "dimension": null
   },
   "knowledge": {
-    "chunk_chars": 12000,
-    "strategy": "generation",
-    "limit": 8,
-    "dimension": 4096
+    "chunk_chars": null,
+    "strategy": null,
+    "limit": null,
+    "dimension": null
   },
   "http": {
-    "url": "http://127.0.0.1:8765",
-    "timeout": 600,
-    "use_llm_action_encoders": true
+    "url": null,
+    "timeout": null,
+    "use_llm_action_encoders": null
   },
   "server": {
     "default_requirements": {
-      "diet": {"mode": "diet", "energy_kcal": 500, "onset": [0, 0]},
-      "exercise": {"mode": "exercise", "duration_min": 20, "onset": [0, 0]},
-      "joint": {"mode": "joint", "energy_kcal": 500, "duration_min": 20, "onset": [0, -15]}
+      "diet": {
+        "mode": null,
+        "energy_kcal": null,
+        "onset": [
+          null,
+          null
+        ]
+      },
+      "exercise": {
+        "mode": null,
+        "duration_min": null,
+        "onset": [
+          null,
+          null
+        ]
+      },
+      "joint": {
+        "mode": null,
+        "energy_kcal": null,
+        "duration_min": null,
+        "onset": [
+          null,
+          null
+        ]
+      }
     },
-    "backend": "api",
-    "latent": "encoder",
-    "latent_id": "Qwen/Qwen3-Embedding-8B",
-    "embedding_model": "Qwen/Qwen3-Embedding-8B",
-    "embedding_device": "cpu",
-    "embedding_query_instruction": "Given a user's metabolic health context and lifestyle requirements, retrieve relevant medical entities and lifestyle guidance.",
-    "local_model": "/path/to/local/text-model",
-    "device": "cpu",
-    "diet_encoder": "outputs/diet_encoder",
-    "exercise_encoder": "outputs/exercise_encoder",
-    "metadata_model": "Qwen/Qwen3-32B",
-    "max_tokens": 4096,
-    "host": "127.0.0.1",
-    "port": 8765,
+    "backend": null,
+    "latent": null,
+    "latent_id": null,
+    "embedding_model": null,
+    "embedding_device": null,
+    "embedding_query_instruction": null,
+    "local_model": null,
+    "device": null,
+    "diet_encoder": null,
+    "exercise_encoder": null,
+    "metadata_model": null,
+    "max_tokens": null,
+    "host": null,
+    "port": null,
     "model_devices": {
-      "diet": "cpu",
-      "exercise": "cpu",
-      "metadata": "cpu"
+      "diet": null,
+      "exercise": null,
+      "metadata": null
     },
-    "contract_attempts": 3,
-    "embedding_max_length": 2048,
-    "do_sample": false,
-    "mock_action_latent_dimension": 8,
-    "mock_metadata_dimension": 8,
-    "mock_action_backend_id": "mock-action-factors",
-    "mock_metadata_backend_id": "mock-metadata",
-    "mock_embedding_backend_id": "mock-knowledge-embedding"
+    "contract_attempts": null,
+    "embedding_max_length": null,
+    "do_sample": null,
+    "mock_action_latent_dimension": null,
+    "mock_metadata_dimension": null,
+    "mock_action_backend_id": null,
+    "mock_metadata_backend_id": null,
+    "mock_embedding_backend_id": null
   },
   "upstream": {
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
-    "api_key_env": "XLIFE_UPSTREAM_API_KEY",
-    "timeout": 150,
-    "max_retries": 1,
-    "temperature": 0
+    "base_url": null,
+    "model": null,
+    "api_key_env": null,
+    "timeout": null,
+    "max_retries": null,
+    "temperature": null,
+    "backend": null,
+    "max_tokens": null,
+    "device": null,
+    "do_sample": null
   },
   "roles": {
     "generate": {
-      "base_url": "https://api.deepseek.com/v1",
-      "model": "deepseek-chat",
-      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
-      "timeout": 150,
-      "max_retries": 1,
-      "temperature": 0
+      "base_url": null,
+      "model": null,
+      "api_key_env": null,
+      "timeout": null,
+      "max_retries": null,
+      "temperature": null,
+      "backend": null,
+      "max_tokens": null,
+      "device": null,
+      "do_sample": null
     },
     "safety": {
-      "base_url": "https://api.deepseek.com/v1",
-      "model": "deepseek-chat",
-      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
-      "timeout": 150,
-      "max_retries": 1,
-      "temperature": 0
+      "base_url": null,
+      "model": null,
+      "api_key_env": null,
+      "timeout": null,
+      "max_retries": null,
+      "temperature": null,
+      "backend": null,
+      "max_tokens": null,
+      "device": null,
+      "do_sample": null
     },
     "action/explicit": {
-      "base_url": "https://api.deepseek.com/v1",
-      "model": "deepseek-chat",
-      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
-      "timeout": 150,
-      "max_retries": 1,
-      "temperature": 0
+      "base_url": null,
+      "model": null,
+      "api_key_env": null,
+      "timeout": null,
+      "max_retries": null,
+      "temperature": null,
+      "backend": null,
+      "max_tokens": null,
+      "device": null,
+      "do_sample": null
     },
     "knowledge/extract": {
-      "base_url": "https://api.deepseek.com/v1",
-      "model": "deepseek-chat",
-      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
-      "timeout": 150,
-      "max_retries": 1,
-      "temperature": 0
+      "base_url": null,
+      "model": null,
+      "api_key_env": null,
+      "timeout": null,
+      "max_retries": null,
+      "temperature": null,
+      "backend": null,
+      "max_tokens": null,
+      "device": null,
+      "do_sample": null
     },
     "teacher": {
-      "base_url": "https://api.deepseek.com/v1",
-      "model": "deepseek-chat",
-      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
-      "timeout": 150,
-      "max_retries": 1,
-      "temperature": 0
+      "base_url": null,
+      "model": null,
+      "api_key_env": null,
+      "timeout": null,
+      "max_retries": null,
+      "temperature": null,
+      "backend": null,
+      "max_tokens": null,
+      "device": null,
+      "do_sample": null
+    },
+    "action/factors": {
+      "backend": null,
+      "base_url": null,
+      "api_key_env": null,
+      "timeout": null,
+      "protocol": null,
+      "model": null
+    },
+    "metadata/encode": {
+      "backend": null,
+      "base_url": null,
+      "api_key_env": null,
+      "timeout": null,
+      "protocol": null,
+      "model": null
+    },
+    "embed": {
+      "backend": null,
+      "base_url": null,
+      "api_key_env": null,
+      "timeout": null,
+      "protocol": null,
+      "model": null
     }
   },
   "schema": {
     "actions": {
       "diet": [
         {
-          "name": "carbohydrate_g",
-          "unit": "g",
-          "scale": 100
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "protein_g",
-          "unit": "g",
-          "scale": 50
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "fat_g",
-          "unit": "g",
-          "scale": 50
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "fiber_g",
-          "unit": "g",
-          "scale": 20
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "mass_g",
-          "unit": "g",
-          "scale": 500
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "energy_kcal",
-          "unit": "kcal",
-          "scale": 1000
+          "name": null,
+          "unit": null,
+          "scale": null
         }
       ],
       "exercise": [
         {
-          "name": "duration_min",
-          "unit": "min",
-          "scale": 60
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "energy_kcal",
-          "unit": "kcal",
-          "scale": 500
+          "name": null,
+          "unit": null,
+          "scale": null
         },
         {
-          "name": "intensity_MET",
-          "unit": "MET",
-          "scale": 10
+          "name": null,
+          "unit": null,
+          "scale": null
         }
       ]
     },
     "supervision": [
       {
-        "name": "cgm",
+        "name": null,
         "path": [
-          "sample",
-          "target"
+          null,
+          null
         ],
         "mask": [
-          "sample",
-          "target_mask"
+          null,
+          null
         ],
         "shape": [
-          36
+          null
         ],
-        "readout": "sequence",
-        "prediction": "predicted_cgm",
-        "loss": "mse",
-        "weight": 1,
-        "scale": "glucose_scale"
+        "readout": null,
+        "prediction": null,
+        "loss": null,
+        "weight": null,
+        "scale": null
       }
     ],
     "retrieval": {
       "generation": {
-        "strategy": "vector",
+        "strategy": null,
         "paths": [
           [
-            "context"
+            null
           ],
           [
-            "requirement"
+            null
           ],
           [
-            "constraints"
+            null
           ]
         ],
-        "dimension": 4096,
-        "limit": 8
+        "dimension": null,
+        "limit": null
       },
       "safety": {
-        "strategy": "exact",
+        "strategy": null,
         "paths": [
           [
-            "candidate",
-            "ingredients"
+            null,
+            null
           ],
           [
-            "candidate",
-            "exercise_type"
+            null,
+            null
           ],
           [
-            "constraints",
-            "conditions"
+            null,
+            null
           ]
         ],
-        "limit": 8
+        "limit": null
       }
     }
   }

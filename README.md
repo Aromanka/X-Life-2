@@ -40,6 +40,12 @@ This repository contains the Python code and minimum dataset for **"A metabolic 
 
 ## 🚀 Quick Start
 
+### Maintained experiment configuration
+
+Current v3 experiments use `config.json` by default. `example_config.json` is an abstract schema: all leaf values are JSON `null` and must be populated before use. Do not copy it over the experiment configuration. Use `--config` or `XLIFE_CONFIG` to select another complete file.
+
+Start the role service from the parent workspace with `python extra_code/server.py --config X-Life-2/config.json`. See [role service configuration](../extra_code/README.md) for API/local selection and model contracts. The older commands below describe the historical pipeline; for the maintained trainer run `python 'world_model+ranking_module/train.py' --help`.
+
 ### System Requirements
 
 #### Software Dependencies

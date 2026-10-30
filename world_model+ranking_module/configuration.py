@@ -4,7 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / 'example_config.json'
+CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config.json'
 _config = None
 _config_path = None
 
@@ -18,6 +18,8 @@ def configure(path=None):
         raise ValueError(f'Cannot read configuration {source}: {error}') from error
     if not isinstance(config, dict):
         raise ValueError('Configuration must be a JSON object')
+    if source.name == 'example_config.json':
+        raise ValueError('example_config.json is an abstract template; use a populated config.json')
     _config = config
     _config_path = source
     return deepcopy(config)

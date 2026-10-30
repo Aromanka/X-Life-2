@@ -1,4 +1,4 @@
-"""Extract structured annotations through the external role service, without local LLMs."""
+"""Extract structured annotations through the external role service, supporting API and local models behind the role service."""
 import argparse
 import json
 from pathlib import Path
