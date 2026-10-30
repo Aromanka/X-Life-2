@@ -182,12 +182,15 @@ class MetabolicWorldModel(nn.Module):
         with torch.no_grad(): self.fusion.basis.copy_(torch.block_diag(self.diet.basis, self.exercise.basis))
 
     def configure_phase(self, phase):
-        if phase not in {'single', 'fusion', 'professional', 'physiological'}: raise ValueError('Invalid training phase')
+        if phase not in {'single', 'fusion', 'professional', 'physiological', 'user_feedback'}: raise ValueError('Invalid training phase')
         for parameter in self.parameters(): parameter.requires_grad = False
         if phase in {'single', 'fusion'}: self.ranked_modes.zero_()
         names = ('diet_encoder', 'exercise_encoder', 'type_embedding', 'metadata_encoder', 'cgm_encoder', 'state_projection', 'diet', 'exercise') if phase == 'single' else ('fusion', 'gate') if phase == 'fusion' else ('ranking_head',)
         for name in names:
             for parameter in getattr(self, name).parameters(): parameter.requires_grad = True
+        if phase == 'user_feedback':
+            for mode in ('diet', 'exercise', 'joint'):
+                self.glucose_simulation_head(mode).requires_grad_(True)
         if phase in ('single', 'fusion'):
             for heads in self.supervision_heads.values():
                 for mode in (('joint',) if phase == 'fusion' else ('diet','exercise')): heads[mode].requires_grad_(True)
@@ -198,6 +201,12 @@ class MetabolicWorldModel(nn.Module):
                 for parameter in encoder.projection.parameters(): parameter.requires_grad = True
         if self.readout == 'autoregressive' and phase in ('single','fusion'):
             for domain in (('joint',) if phase == 'fusion' else ('diet','exercise')): self.ar_decoders[domain].requires_grad_(True)
+
+    def glucose_simulation_head(self, mode):
+        """The glucose readout, excluding shared trajectory and dynamics parameters."""
+        if mode not in ('diet', 'exercise', 'joint'): raise ValueError('Invalid simulation mode')
+        if self.readout == 'autoregressive': return self.ar_decoders[mode]
+        return (self.fusion if mode == 'joint' else getattr(self, mode)).decoder
 
     def train(self, mode=True):
         super().train(mode)

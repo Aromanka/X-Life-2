@@ -1,14 +1,17 @@
+"""Deployment personalisation; see USER_FEEDBACK.md for factual measurement input."""
 import argparse
 from collections import Counter, defaultdict
 from configuration import settings, parse_configured, optimizer_settings
 import hashlib
 import json
 import math
+from itertools import zip_longest
 from pathlib import Path
 import random
 import torch
 from torch.utils.data import DataLoader
-from alignment import MODES, NumericPreferencePairs, FrozenRankingReference, preference_objective
+from alignment import MODES, NumericPreferencePairs, FrozenRankingReference, preference_objective, candidate, batch_candidates
+from runtime_schema import supervision_loss
 from train_data import read_records, ReplayPairs
 from world_model import MetabolicWorldModel, llm_actions_enabled
 
@@ -34,8 +37,51 @@ def feedback_records(records):
     return list(unique.values())
 
 
+def observation_records(records, vocabulary, schema, horizon):
+    """Validate factual executed actions; preference alternatives are never labels."""
+    if not schema or not any(s.get('prediction') == 'predicted_cgm' for s in schema['supervision']):
+        raise ValueError('Feedback simulation updates require a glucose prediction supervision schema')
+    unique, rows = {}, dict(train=[], validation=[], test=[])
+    for row in records:
+        if not isinstance(row.get('observation_id'), str) or not row['observation_id'].strip():
+            raise ValueError('Measurements require a factual observation_id')
+        if not row.get('state_id') or row.get('split') not in rows: raise ValueError('Observations require state_id and explicit split')
+        key = (row['context']['subject_id'], row['observation_id'])
+        if key in unique:
+            if unique[key] != row: raise ValueError('Conflicting duplicate observation')
+            continue
+        unique[key] = row
+        action = candidate(row['context'], row['action'], vocabulary)
+        target = torch.tensor([float('nan') if v is None else v for v in row['target']], dtype=torch.float32)
+        if any(v not in (True, False, 0, 1) for v in row['target_mask']): raise ValueError('Invalid observation mask')
+        mask = torch.tensor(row['target_mask'], dtype=torch.bool)
+        if target.shape != (horizon,) or mask.shape != target.shape: raise ValueError('Observation target and mask must match the prediction horizon')
+        if not mask.any() or not torch.isfinite(target[mask]).all(): raise ValueError('Measured glucose must be finite and nonempty')
+        target = target.masked_fill(~mask, 0.)
+        supervision = {}
+        for spec in schema['supervision']:
+            if spec.get('prediction') == 'predicted_cgm':
+                if spec['shape'] != [horizon]: raise ValueError('Glucose supervision shape differs from observation horizon')
+                supervision[spec['name']] = dict(target=target, mask=mask)
+            else:
+                supervision[spec['name']] = dict(target=torch.zeros(spec['shape']), mask=torch.zeros(spec['shape'], dtype=torch.bool))
+        rows[row['split']].append(dict(action=action, mode=row['action']['mode'], supervision=supervision))
+    return rows
+
+
+def observation_objective(model, rows, device):
+    losses = []
+    for mode in MODES:
+        selected = [row for row in rows if row['mode'] == mode]
+        if not selected: continue
+        batch = batch_candidates([row['action'] for row in selected], device)
+        output = model(batch, mode)
+        losses.append(supervision_loss(model, [row['supervision'] for row in selected], output, mode)*len(selected))
+    return torch.stack(losses).sum()/len(rows)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Offline user-feedback DPO; updates only the ranking head.',
+    parser = argparse.ArgumentParser(description='Participant feedback DPO and factual glucose simulation-head updates.',
         epilog='JSON/JSONL rows use the existing preference schema: state_id, split, context, preferred, rejected, optional pair_weight; '
         'add feedback_id (one user selection event), preferred_id and rejected_id (stable prescription IDs), source_stage=user_feedback. '
         'Supply explicit chosen/rejected pairs, not merely unselected candidates. IDs are scoped by context.subject_id. '
@@ -44,12 +90,15 @@ def main(argv=None):
         'Training keeps one pair per user/selected prescription each epoch and weights it by 1/sqrt(selection count). '
         'Replay uses the configured fraction, with at least one pair per prior stage (the fraction can be higher for small inputs). '
         'Both prior-stage replay files require training pairs; physiological replay requires factual observation IDs. '
+        '--observation-data contains factual observation_id, state_id, split, context, executed action, target and target_mask. '
+        'Only measured glucose supervises the simulation head; unexecuted alternatives never supply targets. '
         'Use one user per run for a personal checkpoint. Resume requires the same data and settings, starts at the next epoch, '
         'and does not restore unconsumed batches after --max-steps. Use this script for feedback resume; phase remains physiological for inference compatibility.')
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--init-checkpoint')
     source.add_argument('--resume')
     parser.add_argument('--data', required=True)
+    parser.add_argument('--observation-data', required=True)
     parser.add_argument('--expert-replay-data', required=True)
     parser.add_argument('--physiological-replay-data', required=True)
     parser.add_argument('--output', required=True)
@@ -74,14 +123,20 @@ def main(argv=None):
     if args.resume and checkpoint.get('alignment_stage') != 'user_feedback': raise ValueError('Resume requires a user-feedback checkpoint')
     if args.init_checkpoint and checkpoint.get('alignment_stage') == 'user_feedback': raise ValueError('Use --resume for a user-feedback checkpoint')
     records = feedback_records(read_records(args.data))
+    measured_records = read_records(args.observation_data)
+    subjects = {r['context']['subject_id'] for r in records + measured_records}
+    if len(subjects) != 1: raise ValueError('Personal feedback and observations must belong to exactly one participant')
     expert_records, physiological_records = read_records(args.expert_replay_data), read_records(args.physiological_replay_data)
     contexts = {}
-    for row in records + expert_records + physiological_records:
+    for row in records + measured_records + expert_records + physiological_records:
         identity = (row['split'], json.dumps(row['context'], sort_keys=True, allow_nan=False))
         for key in (row['state_id'], (row['context']['subject_id'], row['context']['origin'])):
             if key in contexts and contexts[key] != identity: raise ValueError('Replay context or split mismatch')
             contexts[key] = identity
     vocabulary = checkpoint['vocabulary']
+    if checkpoint['model_config']['data_config'] != settings('data'): raise ValueError('Checkpoint data configuration differs from configuration file')
+    observations = observation_records(measured_records, vocabulary, checkpoint['model_config'].get('schema'), settings('data', 'horizon_steps'))
+    if not observations['train']: raise ValueError('Simulation updates require training observations')
     current = NumericPreferencePairs(records, vocabulary, 'user_feedback')
     validation = NumericPreferencePairs(records, vocabulary, 'user_feedback', 'validation')
     expert = NumericPreferencePairs(expert_records, vocabulary, 'professional')
@@ -94,14 +149,17 @@ def main(argv=None):
     for key, indices in groups.items():
         for index in indices: current.rows[index]['pair_weight'] /= math.sqrt(len(selections[key]))
     feedback_settings = dict(beta=args.beta, learning_rate=args.learning_rate, replay_fraction=feedback['replay_fraction'], seed=args.seed, batch_size=args.batch_size,
-        data_signature=hashlib.sha256(json.dumps([records, expert_records, physiological_records], sort_keys=True, allow_nan=False).encode()).hexdigest())
+        simulation_updates=True, participant_id=next(iter(subjects)), gradient_clip=feedback['gradient_clip'], optimizer=optimizer_settings(),
+        data_signature=hashlib.sha256(json.dumps([records, measured_records, expert_records, physiological_records], sort_keys=True, allow_nan=False).encode()).hexdigest())
     previous = checkpoint.get('user_feedback', {})
     if args.resume and previous.get('settings') != feedback_settings: raise ValueError('Resume feedback data or settings differ')
     model = MetabolicWorldModel(**checkpoint['model_config'])
     model.load_checkpoint(checkpoint); model.to(args.device)
     model.configure_phase('physiological'); model.eval()
     reference = FrozenRankingReference(model).to(args.device)
-    optimizer = torch.optim.AdamW(model.ranking_head.parameters(), lr=args.learning_rate, **optimizer_settings())
+    model.configure_phase('user_feedback')
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, **optimizer_settings())
     history, step, start = [], 0, 0
     if args.resume:
         reference.load_state_dict(previous['reference_state_dict'])
@@ -123,25 +181,41 @@ def main(argv=None):
         data = ReplayPairs(selected, [balanced_replay], 0., args.seed)
         data.indices.extend(('old', 0, i) for i in range(replay_count)); rng.shuffle(data.indices)
         total, count, replay_seen = 0., 0, Counter()
-        for pairs in DataLoader(data, batch_size=args.batch_size, collate_fn=list):
+        prediction_total, observed_count = 0., 0
+        pair_loader = DataLoader(data, batch_size=args.batch_size, collate_fn=list)
+        observation_loader = DataLoader(observations['train'], batch_size=args.batch_size, shuffle=True, collate_fn=list)
+        for pairs, measured in zip_longest(pair_loader, observation_loader):
             optimizer.zero_grad(set_to_none=True)
-            loss, _ = preference_objective(model, pairs, reference, args.beta, args.device)
-            loss = loss * (sum(row['pair_weight'] for row in pairs)/len(pairs))
+            losses = []
+            if pairs:
+                preference_loss, _ = preference_objective(model, pairs, reference, args.beta, args.device)
+                preference_loss = preference_loss * (sum(row['pair_weight'] for row in pairs)/len(pairs))
+                losses.append(preference_loss)
+                total += float(preference_loss.detach())*len(pairs); count += len(pairs)
+            if measured:
+                prediction_loss = observation_objective(model, measured, args.device)
+                losses.append(prediction_loss)
+                prediction_total += float(prediction_loss.detach())*len(measured); observed_count += len(measured)
+            loss = torch.stack(losses).sum()
             if not torch.isfinite(loss): raise FloatingPointError('Nonfinite feedback loss')
-            loss.backward(); torch.nn.utils.clip_grad_norm_(model.ranking_head.parameters(), feedback['gradient_clip'], error_if_nonfinite=True); optimizer.step()
-            if any(not torch.isfinite(p).all() for p in model.ranking_head.parameters()): raise FloatingPointError('Nonfinite ranking weights')
-            for row in pairs:
+            loss.backward(); torch.nn.utils.clip_grad_norm_(parameters, feedback['gradient_clip'], error_if_nonfinite=True); optimizer.step()
+            if any(not torch.isfinite(p).all() for p in parameters): raise FloatingPointError('Nonfinite feedback weights')
+            for row in pairs or []:
                 for side in ('preferred', 'rejected'): model.ranked_modes[MODES.index(row[side+'_mode'])] = True
                 if row['source_stage'] != 'user_feedback': replay_seen[row['source_stage']] += 1
-            total += float(loss.detach())*len(pairs); count += len(pairs)
             step += 1; local_steps += 1
             if args.max_steps and local_steps >= args.max_steps: break
-        correct, valid_count = 0., 0
+        correct, valid_count, validation_prediction, validation_observed = 0., 0, 0., 0
         with torch.no_grad():
             for pairs in DataLoader(validation, batch_size=args.batch_size, collate_fn=list):
                 _, accuracy = preference_objective(model, pairs, reference, args.beta, args.device)
                 correct += float(accuracy)*len(pairs); valid_count += len(pairs)
-        entry = dict(epoch=epoch+1, step=step, loss=total/count, pairs=count, feedback_pairs=len(current), selected_pairs=len(selected),
+            for measured in DataLoader(observations['validation'], batch_size=args.batch_size, collate_fn=list):
+                validation_prediction += float(observation_objective(model, measured, args.device))*len(measured)
+                validation_observed += len(measured)
+        entry = dict(epoch=epoch+1, step=step, loss=total/count, physiological_loss=prediction_total/observed_count,
+            observations=observed_count, validation_physiological_loss=validation_prediction/validation_observed if validation_observed else None,
+            pairs=count, feedback_pairs=len(current), selected_pairs=len(selected),
             replay_pairs=dict(replay_seen), replay_fraction=sum(replay_seen.values())/count, validation_accuracy=correct/valid_count if valid_count else None)
         history.append(entry); print(json.dumps(entry, allow_nan=False))
         state = dict(checkpoint)

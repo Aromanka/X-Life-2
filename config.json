@@ -1,0 +1,320 @@
+{
+  "model": {
+    "dimension": 128,
+    "basis_dim": 128,
+    "heads": 4,
+    "layers": 2,
+    "patch_size": 6,
+    "action_backend_id": {
+      "diet": "diet-encoder-v1",
+      "exercise": "exercise-encoder-v1"
+    },
+    "state_pooling": "both",
+    "gap_feature": true,
+    "readout": "direct",
+    "dropout": 0,
+    "feedforward": 512,
+    "feedforward_multiplier": 4,
+    "type_capacity": 128,
+    "position_max_length": 5000,
+    "time_encoding_base": 10000,
+    "activation": "gelu"
+  },
+  "data": {
+    "history_steps": 36,
+    "horizon_steps": 36,
+    "interval_minutes": 5,
+    "train_fraction": 0.8,
+    "validation_fraction": 0.1,
+    "within_subject_train_fraction": 0.5,
+    "metric_horizons_minutes": [
+      30,
+      60,
+      120,
+      180
+    ]
+  },
+  "training": {
+    "dataset": "xlife_cleaned",
+    "phase": "single",
+    "domain": "both",
+    "split": "test",
+    "split_strategy": "subject",
+    "epochs": 10,
+    "batch_size": 8,
+    "device": "cpu",
+    "seed": 42,
+    "rank_only": false,
+    "predict_only": false,
+    "joint_only": false,
+    "learning_rate": 0.0001,
+    "gradient_clip": 1,
+    "scheduler": {
+      "factor": 0.5,
+      "patience": 3,
+      "min_lr": 0.000001
+    },
+    "early_stop_patience": 10,
+    "optimizer": {
+      "betas": [
+        0.9,
+        0.999
+      ],
+      "eps": 1e-8,
+      "weight_decay": 0.01
+    }
+  },
+  "alignment": {
+    "split": "train",
+    "pair_weight": 1.0,
+    "beta": 2,
+    "replay_fraction": 0.25,
+    "learning_rate": 0.0001,
+    "gradient_clip": 1
+  },
+  "user_feedback": {
+    "epochs": 3,
+    "batch_size": 8,
+    "learning_rate": 0.0001,
+    "beta": 2,
+    "seed": 42,
+    "device": "cpu",
+    "replay_fraction": 0.25,
+    "gradient_clip": 1
+  },
+  "inference": {
+    "mode": "diet",
+    "sample_index": 0,
+    "source_mode": null,
+    "ranking": "learned",
+    "count": 5,
+    "batch_size": 8,
+    "seed": 42,
+    "device": "cpu",
+    "top_k": 3,
+    "extract_actions": false,
+    "num_threads": 1,
+    "requirement": null
+  },
+  "action_training": {
+    "model": "Qwen/Qwen2.5-VL-72B-Instruct",
+    "epochs": 1,
+    "learning_rate": 0.00001,
+    "batch_size": 1,
+    "gradient_clip": 1
+  },
+  "action_generation": {
+    "attempts": 3,
+    "max_tokens": 512,
+    "do_sample": false
+  },
+  "annotation": {
+    "role": "teacher",
+    "dimension": 128
+  },
+  "knowledge": {
+    "chunk_chars": 12000,
+    "strategy": "generation",
+    "limit": 8,
+    "dimension": 4096
+  },
+  "http": {
+    "url": "http://127.0.0.1:8765",
+    "timeout": 600,
+    "use_llm_action_encoders": true
+  },
+  "server": {
+    "default_requirements": {
+      "diet": {"mode": "diet", "energy_kcal": 500, "onset": [0, 0]},
+      "exercise": {"mode": "exercise", "duration_min": 20, "onset": [0, 0]},
+      "joint": {"mode": "joint", "energy_kcal": 500, "duration_min": 20, "onset": [0, -15]}
+    },
+    "backend": "api",
+    "latent": "encoder",
+    "latent_id": "Qwen/Qwen3-Embedding-8B",
+    "embedding_model": "Qwen/Qwen3-Embedding-8B",
+    "embedding_device": "cpu",
+    "embedding_query_instruction": "Given a user's metabolic health context and lifestyle requirements, retrieve relevant medical entities and lifestyle guidance.",
+    "local_model": "/path/to/local/text-model",
+    "device": "cpu",
+    "diet_encoder": "outputs/diet_encoder",
+    "exercise_encoder": "outputs/exercise_encoder",
+    "metadata_model": "Qwen/Qwen3-32B",
+    "max_tokens": 4096,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "model_devices": {
+      "diet": "cpu",
+      "exercise": "cpu",
+      "metadata": "cpu"
+    },
+    "contract_attempts": 3,
+    "embedding_max_length": 2048,
+    "do_sample": false,
+    "mock_action_latent_dimension": 8,
+    "mock_metadata_dimension": 8,
+    "mock_action_backend_id": "mock-action-factors",
+    "mock_metadata_backend_id": "mock-metadata",
+    "mock_embedding_backend_id": "mock-knowledge-embedding"
+  },
+  "upstream": {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "api_key_env": "XLIFE_UPSTREAM_API_KEY",
+    "timeout": 150,
+    "max_retries": 1,
+    "temperature": 0
+  },
+  "roles": {
+    "generate": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
+      "timeout": 150,
+      "max_retries": 1,
+      "temperature": 0
+    },
+    "safety": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
+      "timeout": 150,
+      "max_retries": 1,
+      "temperature": 0
+    },
+    "action/explicit": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
+      "timeout": 150,
+      "max_retries": 1,
+      "temperature": 0
+    },
+    "knowledge/extract": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
+      "timeout": 150,
+      "max_retries": 1,
+      "temperature": 0
+    },
+    "teacher": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key_env": "XLIFE_UPSTREAM_API_KEY",
+      "timeout": 150,
+      "max_retries": 1,
+      "temperature": 0
+    }
+  },
+  "schema": {
+    "actions": {
+      "diet": [
+        {
+          "name": "carbohydrate_g",
+          "unit": "g",
+          "scale": 100
+        },
+        {
+          "name": "protein_g",
+          "unit": "g",
+          "scale": 50
+        },
+        {
+          "name": "fat_g",
+          "unit": "g",
+          "scale": 50
+        },
+        {
+          "name": "fiber_g",
+          "unit": "g",
+          "scale": 20
+        },
+        {
+          "name": "mass_g",
+          "unit": "g",
+          "scale": 500
+        },
+        {
+          "name": "energy_kcal",
+          "unit": "kcal",
+          "scale": 1000
+        }
+      ],
+      "exercise": [
+        {
+          "name": "duration_min",
+          "unit": "min",
+          "scale": 60
+        },
+        {
+          "name": "energy_kcal",
+          "unit": "kcal",
+          "scale": 500
+        },
+        {
+          "name": "intensity_MET",
+          "unit": "MET",
+          "scale": 10
+        }
+      ]
+    },
+    "supervision": [
+      {
+        "name": "cgm",
+        "path": [
+          "sample",
+          "target"
+        ],
+        "mask": [
+          "sample",
+          "target_mask"
+        ],
+        "shape": [
+          36
+        ],
+        "readout": "sequence",
+        "prediction": "predicted_cgm",
+        "loss": "mse",
+        "weight": 1,
+        "scale": "glucose_scale"
+      }
+    ],
+    "retrieval": {
+      "generation": {
+        "strategy": "vector",
+        "paths": [
+          [
+            "context"
+          ],
+          [
+            "requirement"
+          ],
+          [
+            "constraints"
+          ]
+        ],
+        "dimension": 4096,
+        "limit": 8
+      },
+      "safety": {
+        "strategy": "exact",
+        "paths": [
+          [
+            "candidate",
+            "ingredients"
+          ],
+          [
+            "candidate",
+            "exercise_type"
+          ],
+          [
+            "constraints",
+            "conditions"
+          ]
+        ],
+        "limit": 8
+      }
+    }
+  }
+}
