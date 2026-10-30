@@ -7,6 +7,13 @@ from backends.metadata_encoder import SemanticMetadataEncoder
 from configuration import configured, settings
 
 
+def ranking_probabilities(logits):
+    """Normalize one complete candidate set sharing a single user state."""
+    if logits.ndim != 1 or not logits.numel(): raise ValueError('A nonempty candidate logit vector is required')
+    if not torch.isfinite(logits).all(): raise FloatingPointError('Nonfinite ranking logit')
+    return torch.softmax(logits, dim=0)
+
+
 def llm_actions_enabled():
     value = os.environ.get('XLIFE_USE_LLM_ACTION_ENCODERS')
     if value is None:
@@ -202,6 +209,12 @@ class MetabolicWorldModel(nn.Module):
 
     @torch.no_grad()
     def rank(self, batch, modes):
+        """Return 0–1 scores for a complete candidate set with one shared context."""
+        return ranking_probabilities(self.rank_logits(batch, modes))
+
+    @torch.no_grad()
+    def rank_logits(self, batch, modes):
+        """Return unbounded logits; callers may collect chunks before softmax."""
         if len(modes) != len(batch['history']): raise ValueError('One mode per candidate is required')
         scores = batch['history'].new_empty(len(modes))
         for mode in set(modes):
@@ -232,6 +245,7 @@ class MetabolicWorldModel(nn.Module):
 
 
 class RankingHead(nn.Module):
+    """Unbounded candidate logits for DPO and subsequent candidate-set softmax."""
     def __init__(self, dimension, heads, layers, architecture):
         super().__init__()
         self.projections = nn.ModuleDict({mode:nn.Linear(dimension*(2 if mode == 'joint' else 1), dimension) for mode in ('diet', 'exercise', 'joint')})

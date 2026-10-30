@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 from train_data import read_records, ReplayPairs
 from dataset_metadata import prepare_metadata
 from configuration import settings, optimizer_settings
+from world_model import ranking_probabilities
 
 
 MODES = ('diet', 'exercise', 'joint')
@@ -96,6 +97,8 @@ def pair_scores(model, pairs, side, reference, device):
 
 
 def preference_objective(model, pairs, reference, beta, device):
+    # These are unbounded logits. Pairwise log-softmax differences equal logit
+    # differences, since the common candidate-set normalizer cancels in DPO.
     preferred, ref_preferred = pair_scores(model, pairs, 'preferred', reference, device)
     rejected, ref_rejected = pair_scores(model, pairs, 'rejected', reference, device)
     weights = preferred.new_tensor([row['pair_weight'] for row in pairs])
@@ -177,11 +180,12 @@ def rank_records(args, model, checkpoint, output):
     for record in read_records(args.data):
         actions = record['candidates']
         if not actions: raise ValueError('No candidates')
-        scores = []
+        logits = []
         for start in range(0, len(actions), args.batch_size):
             chunk = actions[start:start+args.batch_size]
             batch = batch_candidates([candidate(record['context'], action, checkpoint['vocabulary']) for action in chunk], args.device)
-            scores.extend(model.rank(batch, [a['mode'] for a in chunk]).cpu().tolist())
-        if not all(math.isfinite(s) for s in scores): raise FloatingPointError('Nonfinite ranking score')
-        results.append(dict(state_id=record['state_id'], checkpoint=str(Path(args.resume or args.init_checkpoint).resolve()), order=sorted(range(len(scores)), key=lambda i:scores[i], reverse=True)))
+            logits.extend(model.rank_logits(batch, [a['mode'] for a in chunk]).cpu().tolist())
+        scores = ranking_probabilities(torch.tensor(logits, dtype=torch.float64)).tolist()
+        results.append(dict(state_id=record['state_id'], checkpoint=str(Path(args.resume or args.init_checkpoint).resolve()), scores=scores,
+                            order=sorted(range(len(logits)), key=lambda i:logits[i], reverse=True)))
     (output/'rankings.json').write_text(json.dumps(results, allow_nan=False), encoding='utf-8')

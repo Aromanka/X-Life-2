@@ -15,7 +15,7 @@ from dataset import XLifeCleanedDataset
 from generation import prepare
 from knowledge import KnowledgeGraph
 from safety import assess
-from world_model import MetabolicWorldModel, llm_actions_enabled
+from world_model import MetabolicWorldModel, llm_actions_enabled, ranking_probabilities
 from dataset_metadata import prepare_metadata
 from runtime_schema import load_schema, retrieve
 from configuration import configured, settings, parse_configured
@@ -163,6 +163,13 @@ def recommend(context, model, checkpoint, backend, graph, mode=None, count=None,
                         'architecture_version':3, 'glucose_unit':constraints.get('glucose_unit','dataset_native_unknown')}))
             except Exception as error:
                 for row,_,_ in chunk: row.update(status='simulation_failed',reason=str(error))
+    # Normalize across all successfully simulated candidates, across modes and
+    # chunks, before safety filtering. Top-K retains these original scores.
+    simulated = [row for row in output['candidates'] if row['status'] == 'simulated']
+    if ranking == 'learned' and simulated:
+        probabilities = ranking_probabilities(torch.tensor([ranking_logits[row['id']] for row in simulated], dtype=torch.float64))
+        for row, probability in zip(simulated, probabilities.tolist()):
+            row['ranking_score'] = probability
     for row in sorted(output['candidates'],key=lambda r:ranking_logits.get(r['id'],float('-inf')),reverse=True):
         if row['status'] != 'simulated': continue
         raw = row['candidate']

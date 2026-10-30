@@ -240,6 +240,8 @@ python 'world_model+ranking_module/train.py' --config example_config.json \
 
 For physiological alignment, use `--phase physiological`, initialize from the professional checkpoint and supply `--replay-data`. For user feedback, run `train_user_feedback.py --config example_config.json` with the physiological checkpoint and both replay datasets.
 
+The ranking head produces unbounded logits. All alignment stages compute DPO from policy and frozen-reference log-softmax probabilities; their pairwise differences equal logit differences. At inference, `model.rank` returns softmax scores over one complete candidate set sharing the same user state. The ranking CLI collects logits across batches before normalization and writes `scores` in candidate input order. Recommendation output exposes `ranking_score` for learned ranking, normalized across all successfully simulated candidates before safety filtering and Top-K selection. Scores sum to one over that set and depend on its composition; they are not absolute suitability or safety probabilities. Internal logits remain unbounded and are not exported. Ranking v2 checkpoint weights and alignment resume semantics are unchanged.
+
 Training options are available through `python 'world_model+ranking_module/train.py' --help`. Set `http.use_llm_action_encoders` and `model.action_backend_id` in the configuration to use matching HTTP action artifacts. Set model paths, role settings, device assignments and supervision/retrieval schemas in the same file before starting `../extra_code/server.py --config example_config.json`. API credentials are read only from the environment variable named in the configuration.
 
 ### 3. 🛡️ Safety Module
