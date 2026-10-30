@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 from backends.http import HTTPBackend
 from knowledge import KnowledgeGraph,extract,normalize
+from configuration import parse_configured
 
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',nargs='+',required=True);p.add_argument('--output',required=True)
-    p.add_argument('--backend-url');p.add_argument('--chunk-chars',type=int,default=12000)
-    args=p.parse_args(argv)
+    p.add_argument('--backend-url');p.add_argument('--chunk-chars',type=int)
+    args=parse_configured(p, argv, 'knowledge', ('chunk_chars',))
     if args.chunk_chars<1: p.error('Positive chunk size required')
     backend=HTTPBackend(args.backend_url);triples={};provenance=[]
     for name in args.input:

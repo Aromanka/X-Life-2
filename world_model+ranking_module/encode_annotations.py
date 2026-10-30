@@ -3,14 +3,15 @@ import argparse
 import json
 from pathlib import Path
 from backends.http import HTTPBackend
+from configuration import parse_configured
 
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',required=True);p.add_argument('--output',required=True);p.add_argument('--backend-url')
-    p.add_argument('--role',choices=['teacher','action/explicit'],default='teacher')
-    p.add_argument('--dimension',type=int,default=128)
-    args=p.parse_args(argv)
+    p.add_argument('--role',choices=['teacher','action/explicit'])
+    p.add_argument('--dimension',type=int)
+    args=parse_configured(p, argv, 'annotation', ('role', 'dimension'))
     records=json.loads(Path(args.input).read_text(encoding='utf-8'))
     if not isinstance(records,list): raise ValueError('Input must be a list of explicitly selected observations')
     backend=HTTPBackend(args.backend_url);results=[]

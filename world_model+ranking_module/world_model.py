@@ -4,10 +4,14 @@ import torch
 from torch import nn
 from model import CGMTransformerEncoder, transformer_encoder, causal_mask
 from backends.metadata_encoder import SemanticMetadataEncoder
+from configuration import configured, settings
 
 
 def llm_actions_enabled():
-    value = os.environ.get('XLIFE_USE_LLM_ACTION_ENCODERS', '0').strip().lower()
+    value = os.environ.get('XLIFE_USE_LLM_ACTION_ENCODERS')
+    if value is None:
+        return settings('http', 'use_llm_action_encoders')
+    value = value.strip().lower()
     if value not in {'', '0', 'false', 'no', 'off', '1', 'true', 'yes', 'on'}: raise ValueError('Invalid XLIFE_USE_LLM_ACTION_ENCODERS')
     return value in {'1', 'true', 'yes', 'on'}
 
@@ -33,13 +37,14 @@ class NumericEncoder(nn.Module):
 
 
 class Transition(nn.Module):
-    def __init__(self, dimension, basis_dim, heads, layers):
+    def __init__(self, dimension, basis_dim, heads, layers, architecture):
         super().__init__()
         self.conditioning = nn.Sequential(nn.Linear(2*dimension, dimension), nn.GELU(), nn.Linear(dimension, dimension))
         self.basis = nn.Parameter(torch.empty(basis_dim, dimension))
         nn.init.orthogonal_(self.basis)
         self.dynamics = nn.Sequential(nn.Linear(basis_dim, dimension), nn.LayerNorm(dimension), nn.GELU(), nn.Linear(dimension, dimension))
-        self.trajectory = transformer_encoder(dimension, heads, layers, 0.)
+        self.trajectory = transformer_encoder(dimension, heads, layers, architecture['dropout'],
+            dimension*architecture['feedforward_multiplier'], architecture['activation'])
         self.decoder = nn.Linear(dimension, 1)
 
     def increment(self, state): return self.dynamics(state @ self.basis.T)
@@ -51,9 +56,27 @@ class Transition(nn.Module):
 
 class MetabolicWorldModel(nn.Module):
     """Residual diet, exercise and gated joint dynamics."""
-    def __init__(self, dimension=128, basis_dim=128, heads=4, layers=2, patch_size=6, diet_model_path=None, exercise_model_path=None,
-                 action_backend_id=None, state_pooling="both", gap_feature=True, readout="direct", schema=None):
+    def __init__(self, dimension=None, basis_dim=None, heads=None, layers=None, patch_size=None, diet_model_path=None, exercise_model_path=None,
+                 action_backend_id=None, state_pooling=None, gap_feature=None, readout=None, schema=None,
+                 dropout=None, feedforward=None, feedforward_multiplier=None, type_capacity=None,
+                 position_max_length=None, time_encoding_base=None, activation=None, data_config=None):
         super().__init__()
+        dimension = configured('model', 'dimension', dimension)
+        basis_dim = configured('model', 'basis_dim', basis_dim)
+        heads = configured('model', 'heads', heads)
+        layers = configured('model', 'layers', layers)
+        patch_size = configured('model', 'patch_size', patch_size)
+        action_backend_id = configured('model', 'action_backend_id', action_backend_id)
+        state_pooling = configured('model', 'state_pooling', state_pooling)
+        gap_feature = configured('model', 'gap_feature', gap_feature)
+        readout = configured('model', 'readout', readout)
+        self.model_settings = {key: configured('model', key, value) for key, value in
+                              dict(dropout=dropout, feedforward=feedforward, feedforward_multiplier=feedforward_multiplier,
+                                   type_capacity=type_capacity, position_max_length=position_max_length,
+                                   time_encoding_base=time_encoding_base, activation=activation).items()}
+        self.data_config = settings('data') if data_config is None else data_config
+        if dimension < 1 or basis_dim < 1 or heads < 1 or layers < 1 or patch_size < 1:
+            raise ValueError('Model dimensions and counts must be positive')
         if diet_model_path or exercise_model_path:
             raise ValueError('Local language-model paths are retired; configure the external HTTP role service')
         self.dimension, self.llm_actions = dimension, llm_actions_enabled()
@@ -65,12 +88,15 @@ class MetabolicWorldModel(nn.Module):
             self.supervision_heads[spec['name']] = nn.ModuleDict({mode:nn.Linear(dimension * (2 if mode == 'joint' else 1), math.prod(shape)) for mode in ('diet','exercise','joint')})
         self.diet_encoder, self.exercise_encoder = NumericEncoder(6, dimension), NumericEncoder(3, dimension)
         self.metadata_encoder = SemanticMetadataEncoder(dimension)
-        self.type_embedding = nn.Embedding(128, dimension)
-        self.cgm_encoder = CGMTransformerEncoder(d_model=dimension, nhead=heads, num_layers=layers, dropout=0., patch_size=patch_size)
+        self.type_embedding = nn.Embedding(self.model_settings['type_capacity'], dimension)
+        self.cgm_encoder = CGMTransformerEncoder(d_model=dimension, nhead=heads, num_layers=layers,
+            dropout=self.model_settings['dropout'], patch_size=patch_size, dim_feedforward=self.model_settings['feedforward'],
+            position_max_length=self.model_settings['position_max_length'], activation=self.model_settings['activation'],
+            time_encoding_base=self.model_settings['time_encoding_base'])
         self.state_projection = nn.Sequential(nn.Linear(3*dimension+2, dimension), nn.GELU(), nn.Linear(dimension, dimension))
-        self.diet = Transition(dimension, basis_dim, heads, layers)
-        self.exercise = Transition(dimension, basis_dim, heads, layers)
-        self.fusion = Transition(2*dimension, 2*basis_dim, heads, layers)
+        self.diet = Transition(dimension, basis_dim, heads, layers, self.model_settings)
+        self.exercise = Transition(dimension, basis_dim, heads, layers, self.model_settings)
+        self.fusion = Transition(2*dimension, 2*basis_dim, heads, layers, self.model_settings)
         self.gate = nn.Linear(2*basis_dim, 3)
         self.register_buffer('glucose_mean', torch.tensor(0.))
         self.register_buffer('glucose_scale', torch.tensor(1.))
@@ -79,13 +105,16 @@ class MetabolicWorldModel(nn.Module):
         self.state_pooling, self.gap_feature, self.readout = state_pooling, gap_feature, readout
         if readout == 'autoregressive':
             from model import CGMTransformerDecoder
-            self.ar_decoders = nn.ModuleDict({name:CGMTransformerDecoder(d_model=dimension*(2 if name=='joint' else 1), nhead=heads, num_layers=layers, dropout=0.) for name in ('diet','exercise','joint')})
+            self.ar_decoders = nn.ModuleDict({name:CGMTransformerDecoder(d_model=dimension*(2 if name=='joint' else 1), nhead=heads, num_layers=layers,
+                dropout=self.model_settings['dropout'], dim_feedforward=self.model_settings['feedforward'],
+                position_max_length=self.model_settings['position_max_length'], activation=self.model_settings['activation'],
+                time_encoding_base=self.model_settings['time_encoding_base']) for name in ('diet','exercise','joint')})
         if self.llm_actions:
             if not action_backend_id: raise ValueError('Configure action_backend_id for HTTP action encoders')
             from backends.action_encoder import HTTPActionEncoder
             self.diet_vlm = HTTPActionEncoder('diet', dimension, action_backend_id)
             self.exercise_vlm = HTTPActionEncoder('exercise', dimension, action_backend_id)
-        self.ranking_head = RankingHead(dimension, heads, layers)
+        self.ranking_head = RankingHead(dimension, heads, layers, self.model_settings)
         self.register_buffer('ranked_modes', torch.zeros(3, dtype=torch.bool))
 
     def fit(self, samples):
@@ -96,8 +125,8 @@ class MetabolicWorldModel(nn.Module):
         self.glucose_mean.copy_(observed.mean()); self.glucose_scale.copy_(observed.std(unbiased=False).clamp_min(1e-3))
 
     def time_encoding(self, minutes, dimension):
-        frequencies = torch.exp(torch.arange(0, dimension, 2, device=minutes.device)*(-math.log(10000.)/dimension))
-        phase = minutes[:, None]/5 * frequencies
+        frequencies = torch.exp(torch.arange(0, dimension, 2, device=minutes.device)*(-math.log(self.model_settings['time_encoding_base'])/dimension))
+        phase = minutes[:, None]/self.data_config['interval_minutes'] * frequencies
         return torch.stack([phase.sin(), phase.cos()], -1).flatten(-2)[:, :dimension]
 
     def initial_states(self, batch):
@@ -151,7 +180,8 @@ class MetabolicWorldModel(nn.Module):
         if self.llm_actions: self.diet_vlm.eval(); self.exercise_vlm.eval()
         return self
 
-    def forward(self, batch, mode, horizon=36):
+    def forward(self, batch, mode, horizon=None):
+        horizon = self.data_config['horizon_steps'] if horizon is None else horizon
         if mode not in {'diet', 'exercise', 'joint'} or horizon < 1: raise ValueError('Invalid mode or horizon')
         diet, exercise, last = self.initial_states(batch)
         state = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
@@ -202,10 +232,11 @@ class MetabolicWorldModel(nn.Module):
 
 
 class RankingHead(nn.Module):
-    def __init__(self, dimension, heads, layers):
+    def __init__(self, dimension, heads, layers, architecture):
         super().__init__()
         self.projections = nn.ModuleDict({mode:nn.Linear(dimension*(2 if mode == 'joint' else 1), dimension) for mode in ('diet', 'exercise', 'joint')})
-        self.backbone = transformer_encoder(dimension, heads, layers, 0.)
+        self.backbone = transformer_encoder(dimension, heads, layers, architecture['dropout'],
+            dimension*architecture['feedforward_multiplier'], architecture['activation'])
         self.score = nn.Sequential(nn.Linear(dimension, dimension), nn.GELU(), nn.Linear(dimension, 1))
 
     def forward(self, trajectory, mode):

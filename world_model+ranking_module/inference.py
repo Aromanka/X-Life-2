@@ -18,6 +18,7 @@ from safety import assess
 from world_model import MetabolicWorldModel, llm_actions_enabled
 from dataset_metadata import prepare_metadata
 from runtime_schema import load_schema, retrieve
+from configuration import configured, settings, parse_configured
 
 
 def finite_json(value):
@@ -29,7 +30,7 @@ def finite_json(value):
 
 
 def masked_context(sample):
-    # Deliberate allowlist: original diet, exercise, texts, onset and future targets never escape.
+
     return finite_json({k:sample[k] for k in ('subject_id','origin','history','history_mask','metadata')})
 
 
@@ -53,21 +54,32 @@ def load_model(path, device):
     if checkpoint['llm_actions'] != llm_actions_enabled(): raise ValueError('Checkpoint action backend mismatch')
     model = MetabolicWorldModel(**checkpoint['model_config'])
     model.load_checkpoint(checkpoint)
+    if model.data_config != settings('data'):
+        raise ValueError('Checkpoint data configuration differs from configuration file')
     return model.to(device).eval(), checkpoint
 
 
-def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, seed=42,
-              ranking='learned', constraints=None, requirement=None, candidates=None, top_k=3,
-              device='cpu', batch_size=8, extract_actions=False):
+def recommend(context, model, checkpoint, backend, graph, mode=None, count=None, seed=None,
+              ranking=None, constraints=None, requirement=None, candidates=None, top_k=None,
+              device=None, batch_size=None, extract_actions=None):
+    mode = configured('inference', 'mode', mode)
+    count = configured('inference', 'count', count)
+    seed = configured('inference', 'seed', seed)
+    ranking = configured('inference', 'ranking', ranking)
+    top_k = configured('inference', 'top_k', top_k)
+    device = configured('inference', 'device', device)
+    batch_size = configured('inference', 'batch_size', batch_size)
+    extract_actions = configured('inference', 'extract_actions', extract_actions)
     if ranking not in ('learned','random'): raise ValueError('Unknown ranking backend')
     if set(context)!={'subject_id','origin','history','history_mask','metadata'}:
         raise ValueError('Only masked physiological context may enter recommendation')
     if count<1 or top_k<1 or batch_size<1: raise ValueError('Positive counts required')
     constraints = constraints or {}
     if requirement is None:
-        requirement=dict(mode=mode,preference_seed=seed,onset=[0,-15] if mode=='joint' else [0,0])
-        if mode in ('diet','joint'): requirement['energy_kcal']=random.Random(seed).randint(350,650)
-        if mode in ('exercise','joint'): requirement['duration_min']=random.Random(seed+1).randint(10,30)
+        specification = settings('inference', 'requirement')
+        requirement=dict(mode=mode,preference_seed=seed,onset=specification['joint_onset'] if mode=='joint' else specification['single_onset'])
+        if mode in ('diet','joint'): requirement['energy_kcal']=random.Random(seed).randint(*specification['energy_kcal_range'])
+        if mode in ('exercise','joint'): requirement['duration_min']=random.Random(seed+1).randint(*specification['duration_min_range'])
     context = deepcopy(context)
     identity = hashlib.sha256(json.dumps(context,sort_keys=True,allow_nan=False).encode()).hexdigest()
     output = dict(schema_version=2, context=context, context_hash=identity, requirement=requirement,
@@ -130,7 +142,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
             valid.append((row,action,sample))
         except Exception as error:
             row.update(status='invalid',reason=str(error))
-    # Every candidate sees the same measured history. Batch only compatible domains.
+
     for domain in ('diet','exercise','joint'):
         group = [r for r in valid if r[1]['mode']==domain]
         for start in range(0,len(group),batch_size):
@@ -147,7 +159,7 @@ def recommend(context, model, checkpoint, backend, graph, mode='diet', count=5, 
                     row.update(status='simulated', simulation=finite_json({
                         'predicted_cgm':simulation['predicted_cgm'][j], 'trajectory':simulation['trajectory'][j],
                         'gates':simulation['gates'][j] if simulation['gates'] is not None else None,
-                        'time_minutes':list(range(5,181,5)), 'onset':action['onset'],
+                        'time_minutes':[(i+1)*model.data_config['interval_minutes'] for i in range(model.data_config['horizon_steps'])], 'onset':action['onset'],
                         'architecture_version':3, 'glucose_unit':constraints.get('glucose_unit','dataset_native_unknown')}))
             except Exception as error:
                 for row,_,_ in chunk: row.update(status='simulation_failed',reason=str(error))
@@ -179,24 +191,26 @@ def main(argv=None):
     parser.add_argument('--data',required=True)
     parser.add_argument('--checkpoint',required=True)
     parser.add_argument('--output',required=True)
-    parser.add_argument('--mode',choices=['diet','exercise','joint'],default='diet')
-    parser.add_argument('--sample-index',type=int,default=0)
+    parser.add_argument('--mode',choices=['diet','exercise','joint'])
+    parser.add_argument('--sample-index',type=int)
     parser.add_argument('--subject-id')
     parser.add_argument('--source-mode',choices=['diet','exercise'])
-    parser.add_argument('--ranking',choices=['learned','random'],default='learned')
+    parser.add_argument('--ranking',choices=['learned','random'])
     parser.add_argument('--backend-url')
     parser.add_argument('--knowledge')
     parser.add_argument('--constraints')
     parser.add_argument('--requirement')
     parser.add_argument('--candidates')
-    parser.add_argument('--extract-actions',action='store_true')
-    parser.add_argument('--count',type=int,default=5)
-    parser.add_argument('--batch-size',type=int,default=8)
-    parser.add_argument('--seed',type=int,default=42)
-    parser.add_argument('--device',default='cpu')
-    args = parser.parse_args(argv)
+    parser.add_argument('--extract-actions',action='store_true',default=None)
+    parser.add_argument('--count',type=int)
+    parser.add_argument('--batch-size',type=int)
+    parser.add_argument('--seed',type=int)
+    parser.add_argument('--device')
+    parser.add_argument('--top-k',type=int)
+    args = parse_configured(parser, argv, 'inference',
+        ('mode', 'sample_index', 'source_mode', 'ranking', 'extract_actions', 'count', 'batch_size', 'seed', 'device', 'top_k'))
     if args.count<1 or args.batch_size<1 or args.sample_index<0: parser.error('Counts must be positive and index nonnegative')
-    torch.set_num_threads(1); torch.manual_seed(args.seed)
+    torch.set_num_threads(settings('inference', 'num_threads')); torch.manual_seed(args.seed)
     started=time.perf_counter()
     model,checkpoint=load_model(args.checkpoint,args.device)
     rows=XLifeCleanedDataset(args.data).samples
@@ -205,7 +219,7 @@ def main(argv=None):
     read=lambda path:json.loads(Path(path).read_text(encoding='utf-8')) if path else None
     result=recommend(masked_context(rows[args.sample_index]),model,checkpoint,HTTPBackend(args.backend_url),
         KnowledgeGraph.load(args.knowledge),args.mode,args.count,args.seed,args.ranking,read(args.constraints),
-        read(args.requirement),read(args.candidates),device=args.device,batch_size=args.batch_size,extract_actions=args.extract_actions)
+        read(args.requirement),read(args.candidates),top_k=args.top_k,device=args.device,batch_size=args.batch_size,extract_actions=args.extract_actions)
     result.update(checkpoint=str(Path(args.checkpoint).resolve()),source_mode=rows[args.sample_index]['mode'],
                   elapsed_seconds=time.perf_counter()-started)
     path=Path(args.output);path.parent.mkdir(parents=True,exist_ok=True)

@@ -2,6 +2,7 @@ import json
 import os
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from configuration import configured
 
 
 class BackendError(RuntimeError):
@@ -10,9 +11,9 @@ class BackendError(RuntimeError):
 
 class HTTPBackend:
     """Role-based POST contract; prompts and model selection belong to the server."""
-    def __init__(self, url=None, timeout=600):
-        self.url = (url or os.environ.get('XLIFE_LLM_URL', 'http://127.0.0.1:8765')).rstrip('/')
-        self.timeout = timeout
+    def __init__(self, url=None, timeout=None):
+        self.url = configured('http', 'url', url or os.environ.get('XLIFE_LLM_URL')).rstrip('/')
+        self.timeout = configured('http', 'timeout', timeout)
 
     def call(self, role, payload):
         request = Request(self.url + '/v1/' + role, data=json.dumps(payload, allow_nan=False).encode(),

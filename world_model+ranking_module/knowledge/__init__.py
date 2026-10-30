@@ -3,6 +3,7 @@ import json
 import re
 import unicodedata
 from pathlib import Path
+from configuration import configured
 
 
 def normalize(value):
@@ -29,7 +30,9 @@ class KnowledgeGraph:
         provenance=json.loads(sidecar.read_text(encoding='utf-8')) if sidecar.exists() else []
         return cls(json.loads(path.read_text(encoding='utf-8')),str(path),provenance)
 
-    def retrieve(self, terms, strategy='generation', limit=8):
+    def retrieve(self, terms, strategy=None, limit=None):
+        strategy = configured('knowledge', 'strategy', strategy)
+        limit = configured('knowledge', 'limit', limit)
         terms = [normalize(t) for t in terms if t]
         if strategy == 'safety':
             indices = set().union(*(self.index.get(t,set()) for t in terms)) if terms else set()
@@ -38,7 +41,9 @@ class KnowledgeGraph:
         else: raise ValueError('Unknown retrieval strategy')
         return [self.triples[i] for i in sorted(indices)[:limit]]
 
-    def retrieve_vector(self, query, backend, dimension=128, limit=8):
+    def retrieve_vector(self, query, backend, dimension=None, limit=None):
+        dimension = configured('knowledge', 'dimension', dimension)
+        limit = configured('knowledge', 'limit', limit)
         import numpy as np
         responses = [backend.call('embed', {'text':text, 'dimension':dimension}) for text in
                      [query]+[r['head']+' '+r['relation']+' '+r['tail'] for r in self.triples]]

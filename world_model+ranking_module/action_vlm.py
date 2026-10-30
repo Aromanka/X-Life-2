@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from action_factor_format import parse_action_factors
+from configuration import settings
 
 
 class ActionVLM(nn.Module):
@@ -22,7 +23,7 @@ class ActionVLM(nn.Module):
         state = torch.load(artifact, map_location='cpu', weights_only=True) if artifact.exists() else None
         if factor_schema is None:
             factor_schema = state.get('factor_schema') if state else None
-            if factor_schema is None: factor_schema = json.loads((Path(__file__).resolve().parents[2]/'extra_code/schema.json').read_text(encoding='utf-8'))['actions'][domain]
+            if factor_schema is None: factor_schema = settings('schema', 'actions', domain)
         if state and state.get('factor_schema', factor_schema) != factor_schema: raise ValueError('Action artifact factor schema mismatch')
         self.factor_schema = factor_schema
         self.factor_head = nn.Linear(self.vlm.config.text_config.hidden_size, len(factor_schema))
@@ -84,7 +85,8 @@ class ActionVLM(nn.Module):
     @torch.inference_mode()
     def generate_factors(self, text, images=()):
         schema = getattr(self, 'factor_schema', None)
-        if schema is None: schema = json.loads((Path(__file__).resolve().parents[2]/'extra_code/schema.json').read_text(encoding='utf-8'))['actions'][self.domain]
+        if schema is None: schema = settings('schema', 'actions', self.domain)
+        generation = settings('action_generation')
         fields = ', '.join(s['name'] + ' (' + s['unit'] + ')' for s in schema)
         count = len(schema)
         request = (text + '\nReturn ONLY one JSON object with key "factors" containing exactly '
@@ -94,13 +96,13 @@ class ActionVLM(nn.Module):
                    'Multiple images may show the same meal; do not double count. '
                    'No per-food lists, alternative answers, markdown or prose.')
         errors, answer = [], ''
-        for attempt in range(3):
+        for attempt in range(generation['attempts']):
             correction = '' if not errors else ('\nYour previous response was invalid: ' + errors[-1]
                 + '\nPrevious response:\n' + answer[:2000]
                 + f'\nCorrect the format and provide ALL {count} factors, including missing estimates. Return one aggregate vector.')
             inputs, _ = self.inputs(request + correction, images)
             inputs = {k:v.to(self.vlm.device) for k,v in inputs.items()}
-            generated = self.vlm.generate(**inputs, max_new_tokens=512, do_sample=False)
+            generated = self.vlm.generate(**inputs, max_new_tokens=generation['max_tokens'], do_sample=generation['do_sample'])
             answer = self.processor.batch_decode(generated[:, inputs['input_ids'].size(1):], skip_special_tokens=True)[0].strip()
             try:
                 factors = self.parse_factors(answer)
@@ -111,7 +113,7 @@ class ActionVLM(nn.Module):
                 return vector
             except ValueError as error:
                 errors.append(str(error))
-                logging.getLogger(__name__).warning('%s action format attempt %d/3: %s; response=%r',
-                    self.domain, attempt+1, error, answer[:1000])
-        raise ValueError(f'{self.domain} action factors invalid after 3 attempts: {errors[-1]}; '
+                logging.getLogger(__name__).warning('%s action format attempt %d/%d: %s; response=%r',
+                    self.domain, attempt+1, generation['attempts'], error, answer[:1000])
+        raise ValueError(f"{self.domain} action factors invalid after {generation['attempts']} attempts: {errors[-1]}; "
                          f'model_response={answer[:1000]!r}')

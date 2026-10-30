@@ -1,5 +1,6 @@
 import argparse
 from collections import Counter, defaultdict
+from configuration import settings, parse_configured, optimizer_settings
 import hashlib
 import json
 import math
@@ -38,10 +39,10 @@ def main(argv=None):
         epilog='JSON/JSONL rows use the existing preference schema: state_id, split, context, preferred, rejected, optional pair_weight; '
         'add feedback_id (one user selection event), preferred_id and rejected_id (stable prescription IDs), source_stage=user_feedback. '
         'Supply explicit chosen/rejected pairs, not merely unselected candidates. IDs are scoped by context.subject_id. '
-        'context uses history/history_mask (36 points), metadata, subject_id and origin; actions use mode, diet (6 factors), '
+        'context uses configured history/history_mask, metadata, subject_id and origin; actions use mode, diet (6 factors), '
         'exercise (3 factors), onset (2 offsets), and optional exercise_type, diet_text, exercise_text, diet_images. '
         'Training keeps one pair per user/selected prescription each epoch and weights it by 1/sqrt(selection count). '
-        'Replay targets 25 percent, with at least one pair per prior stage (the fraction can be higher for small inputs). '
+        'Replay uses the configured fraction, with at least one pair per prior stage (the fraction can be higher for small inputs). '
         'Both prior-stage replay files require training pairs; physiological replay requires factual observation IDs. '
         'Use one user per run for a personal checkpoint. Resume requires the same data and settings, starts at the next epoch, '
         'and does not restore unconsumed batches after --max-steps. Use this script for feedback resume; phase remains physiological for inference compatibility.')
@@ -52,14 +53,16 @@ def main(argv=None):
     parser.add_argument('--expert-replay-data', required=True)
     parser.add_argument('--physiological-replay-data', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--epochs', type=int)
+    parser.add_argument('--batch-size', type=int)
     parser.add_argument('--max-steps', type=int)
-    parser.add_argument('--learning-rate', type=float, default=1e-4)
-    parser.add_argument('--beta', type=float, default=2.)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
-    args = parser.parse_args(argv)
+    parser.add_argument('--learning-rate', type=float)
+    parser.add_argument('--beta', type=float)
+    parser.add_argument('--seed', type=int)
+    parser.add_argument('--device')
+    args = parse_configured(parser, argv, 'user_feedback',
+        ('epochs', 'batch_size', 'learning_rate', 'beta', 'seed', 'device'))
+    feedback = settings('user_feedback')
     if args.epochs < 1 or args.batch_size < 1 or (args.max_steps is not None and args.max_steps < 1): raise ValueError('Counts must be positive')
     if any(not math.isfinite(v) or v <= 0 for v in (args.beta, args.learning_rate)): raise ValueError('Beta and learning rate must be finite and positive')
     random.seed(args.seed); torch.manual_seed(args.seed)
@@ -90,15 +93,15 @@ def main(argv=None):
         groups[key].append(index); selections[key].add(row['feedback_id'])
     for key, indices in groups.items():
         for index in indices: current.rows[index]['pair_weight'] /= math.sqrt(len(selections[key]))
-    settings = dict(beta=args.beta, learning_rate=args.learning_rate, replay_fraction=.25, seed=args.seed, batch_size=args.batch_size,
+    feedback_settings = dict(beta=args.beta, learning_rate=args.learning_rate, replay_fraction=feedback['replay_fraction'], seed=args.seed, batch_size=args.batch_size,
         data_signature=hashlib.sha256(json.dumps([records, expert_records, physiological_records], sort_keys=True, allow_nan=False).encode()).hexdigest())
     previous = checkpoint.get('user_feedback', {})
-    if args.resume and previous.get('settings') != settings: raise ValueError('Resume feedback data or settings differ')
+    if args.resume and previous.get('settings') != feedback_settings: raise ValueError('Resume feedback data or settings differ')
     model = MetabolicWorldModel(**checkpoint['model_config'])
     model.load_checkpoint(checkpoint); model.to(args.device)
     model.configure_phase('physiological'); model.eval()
     reference = FrozenRankingReference(model).to(args.device)
-    optimizer = torch.optim.AdamW(model.ranking_head.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(model.ranking_head.parameters(), lr=args.learning_rate, **optimizer_settings())
     history, step, start = [], 0, 0
     if args.resume:
         reference.load_state_dict(previous['reference_state_dict'])
@@ -112,7 +115,9 @@ def main(argv=None):
     for epoch in range(start, start + args.epochs):
         rng = random.Random(args.seed + epoch)
         selected = [current[rng.choice(indices)] for indices in groups.values()]
-        replay_count = max(2, round(len(selected)/3))
+        fraction = feedback['replay_fraction']
+        if not 0 < fraction < 1: raise ValueError('Feedback replay fraction must be between zero and one')
+        replay_count = max(2, round(len(selected)*fraction/(1-fraction)))
         old = [expert, physiological]
         balanced_replay = [old[i % 2][rng.randrange(len(old[i % 2]))] for i in range(replay_count)]
         data = ReplayPairs(selected, [balanced_replay], 0., args.seed)
@@ -123,7 +128,7 @@ def main(argv=None):
             loss, _ = preference_objective(model, pairs, reference, args.beta, args.device)
             loss = loss * (sum(row['pair_weight'] for row in pairs)/len(pairs))
             if not torch.isfinite(loss): raise FloatingPointError('Nonfinite feedback loss')
-            loss.backward(); torch.nn.utils.clip_grad_norm_(model.ranking_head.parameters(), 1., error_if_nonfinite=True); optimizer.step()
+            loss.backward(); torch.nn.utils.clip_grad_norm_(model.ranking_head.parameters(), feedback['gradient_clip'], error_if_nonfinite=True); optimizer.step()
             if any(not torch.isfinite(p).all() for p in model.ranking_head.parameters()): raise FloatingPointError('Nonfinite ranking weights')
             for row in pairs:
                 for side in ('preferred', 'rejected'): model.ranked_modes[MODES.index(row[side+'_mode'])] = True
@@ -142,7 +147,7 @@ def main(argv=None):
         state = dict(checkpoint)
         state.update(model_state_dict=model.state_dict(), alignment_stage='user_feedback', parent=str(Path(parent).resolve()),
             test_backend=checkpoint.get('test_backend', False) or model.metadata_encoder.test_backend or bool(model.llm_actions and (model.diet_vlm.test_backend or model.exercise_vlm.test_backend)),
-            user_feedback=dict(settings=settings, optimizer=optimizer.state_dict(), reference_state_dict=reference.state_dict(),
+            user_feedback=dict(settings=feedback_settings, optimizer=optimizer.state_dict(), reference_state_dict=reference.state_dict(),
                 reference_parent=previous['reference_parent'] if args.resume else str(Path(parent).resolve()), epoch=epoch+1, global_step=step, history=history,
                 selection_counts=[dict(subject_id=k[0], preferred_id=k[1], count=len(v)) for k,v in selections.items()],
                 rng_state=torch.get_rng_state(), random_state=random.getstate(), cuda_rng_state=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None))

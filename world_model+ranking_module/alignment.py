@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 from train_data import read_records, ReplayPairs
 from dataset_metadata import prepare_metadata
+from configuration import settings, optimizer_settings
 
 
 MODES = ('diet', 'exercise', 'joint')
@@ -24,7 +25,8 @@ def candidate(context, action, vocabulary):
               'metadata':prepare_metadata(context['metadata'])}
     if any(value not in (True, False, 0, 1) for value in context['history_mask']): raise ValueError('Invalid history mask')
     sample['history_mask'] = torch.tensor(context['history_mask'], dtype=torch.bool)
-    if sample['history'].shape != (36,) or sample['history_mask'].shape != (36,): raise ValueError('Expected 36 history points')
+    shape = (settings('data', 'history_steps'),)
+    if sample['history'].shape != shape or sample['history_mask'].shape != shape: raise ValueError(f'Expected {shape[0]} history points')
     if not sample['history_mask'].any() or not torch.isfinite(sample['history'][sample['history_mask']]).all(): raise ValueError('Measured history must be finite and nonempty')
     sample['history'] = sample['history'].masked_fill(~sample['history_mask'], 0.)
     for name, size in (('diet', 6), ('exercise', 3)):
@@ -42,7 +44,8 @@ def candidate(context, action, vocabulary):
 
 
 class NumericPreferencePairs(Dataset):
-    def __init__(self, records, vocabulary, stage, split='train'):
+    def __init__(self, records, vocabulary, stage, split=None):
+        split = settings('alignment', 'split') if split is None else split
         self.rows = []
         contexts = {}
         for row in records:
@@ -56,7 +59,7 @@ class NumericPreferencePairs(Dataset):
                 evidence = row.get('evidence', {})
                 if not all(isinstance(evidence.get(k), str) and evidence[k].strip() for k in ('source', 'preferred_observation_id', 'rejected_observation_id')): raise ValueError('Physiological pairs require source and two factual observation IDs')
                 if evidence['preferred_observation_id'] == evidence['rejected_observation_id']: raise ValueError('Two alternatives cannot share one factual observation')
-            weight = float(row.get('pair_weight', 1.))
+            weight = float(row['pair_weight'] if 'pair_weight' in row else settings('alignment', 'pair_weight'))
             if not math.isfinite(weight) or weight <= 0: raise ValueError('Pair weight must be finite and positive')
             pair = {side:candidate(row['context'], row[side], vocabulary) for side in ('preferred', 'rejected')}
             pair.update(preferred_mode=row['preferred']['mode'], rejected_mode=row['rejected']['mode'], pair_weight=weight, source_stage=stage)
@@ -104,8 +107,8 @@ def preference_objective(model, pairs, reference, beta, device):
 
 
 def run_alignment(args, model, checkpoint, config, output):
-    settings = config.get('alignment', {})
-    beta, fraction = float(settings.get('beta', 2.)), float(settings.get('replay_fraction', .25))
+    alignment_settings = config['alignment']
+    beta, fraction = float(alignment_settings['beta']), float(alignment_settings['replay_fraction'])
     if not math.isfinite(beta) or beta <= 0: raise ValueError('DPO beta must be finite and positive')
     if args.phase == 'physiological' and not .2 <= fraction <= .3: raise ValueError('Physiological replay must be 20–30 percent')
     expected = 'professional' if args.phase == 'physiological' else 'fusion'
@@ -129,7 +132,7 @@ def run_alignment(args, model, checkpoint, config, output):
     alignment = dict(beta=beta, replay_fraction=fraction if previous_records else 0., data_signature=signature, seed=args.seed)
     model.configure_phase(args.phase); model.eval()
     reference = FrozenRankingReference(model).to(args.device)
-    optimizer = torch.optim.AdamW(model.ranking_head.parameters(), lr=settings.get('learning_rate', 1e-4))
+    optimizer = torch.optim.AdamW(model.ranking_head.parameters(), lr=alignment_settings['learning_rate'], **optimizer_settings())
     history, step, start = [], 0, 0
     if args.resume:
         if checkpoint['alignment'] != alignment: raise ValueError('Resume alignment settings or data differ')
@@ -147,7 +150,7 @@ def run_alignment(args, model, checkpoint, config, output):
             optimizer.zero_grad(set_to_none=True)
             loss, _ = preference_objective(model, pairs, reference, beta, args.device)
             if not torch.isfinite(loss): raise FloatingPointError('Nonfinite preference loss')
-            loss.backward(); torch.nn.utils.clip_grad_norm_(model.ranking_head.parameters(), 1.); optimizer.step()
+            loss.backward(); torch.nn.utils.clip_grad_norm_(model.ranking_head.parameters(), alignment_settings['gradient_clip']); optimizer.step()
             for row in pairs:
                 for side in ('preferred', 'rejected'): model.ranked_modes[MODES.index(row[side+'_mode'])] = True
             total += float(loss.detach())*len(pairs); count += len(pairs)

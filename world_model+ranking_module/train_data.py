@@ -7,6 +7,7 @@ from pathlib import Path
 import random
 import torch
 from torch.utils.data import Dataset
+from configuration import configured
 
 def read_records(path):
     path = Path(path)
@@ -20,7 +21,9 @@ def read_records(path):
 
 class ReplayPairs(Dataset):
     """Shuffle all new pairs and a configured proportion of prior-stage pairs per epoch."""
-    def __init__(self, current, previous, fraction=0.25, seed=42):
+    def __init__(self, current, previous, fraction=None, seed=None):
+        fraction = configured('alignment', 'replay_fraction', fraction)
+        seed = configured('training', 'seed', seed)
         if not 0 <= fraction < 1:
             raise ValueError("Replay fraction must be in [0, 1).")
         self.current, self.previous, self.fraction, self.seed = current, list(previous), fraction, seed

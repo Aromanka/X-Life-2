@@ -1,64 +1,370 @@
-# X-Life
+<p align="center">
+  <img src="./src/xlife.png" width="300" alt="X-Life System Logo">
+</p>
 
-当前维护主线是 v3 数值动作世界模型：独立饮食/运动残差动力学、三路门控融合、并列生理预测和独立排序头，以及 HTTP 知识生成与安全审查。
+<h1 align="center">X-Life</h1>
 
-Metadata 统一使用 Qwen3-32B 语义编码后对齐 CGM 特征，自动解析嵌套字段与变长数组。数据接口、服务启动和 checkpoint 兼容性见 [Metadata 编码](docs/METADATA.md)。训练前需要启动该服务，或提供已编码 metadata；原数值 metadata checkpoint 需要重新训练。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyTorch 2.7](https://img.shields.io/badge/PyTorch-2.7-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![Unity 2022.3](https://img.shields.io/badge/Unity-2022.3.x-000000?logo=unity&logoColor=white)](https://unity.com/)
+[![Citation](https://img.shields.io/badge/Citation-CITATION.cff-lightgrey)](./CITATION.cff)
 
-在 X-Life-2 目录安装唯一依赖清单：`pip install -r requirements.txt`。
+<p align="center">
+  <strong>X-Life</strong> is a metabolic world-model system for adaptive lifestyle medicine that translates continuous physiological data and sensing into personalised, quantitative dietary and postprandial activity prescriptions, concurrently meeting individual lifestyle preferences, contextual settings and safety constraints.
+</p>
 
-## 离线推理
+## 📋 Table of Contents
 
-先启动同级 extra_code 的角色服务器。提示词、模型名称和上游设置全部集中在 extra_code。应用只发送结构化 HTTP POST。完整服务器命令见同级 exp_1029_v2.sh。
+- [📋 Table of Contents](#-table-of-contents)
+- [🌟 Overview](#-overview)
+- [🚀 Quick Start](#-quick-start)
+  - [System Requirements](#system-requirements)
+    - [Software Dependencies](#software-dependencies)
+    - [Hardware Requirements](#hardware-requirements)
+  - [Installation](#installation)
+    - [1. Clone the Repository](#1-clone-the-repository)
+    - [2. Create Python Environment](#2-create-python-environment)
+    - [3. Install Python Dependencies](#3-install-python-dependencies)
+    - [4. Install Neo4j Service](#4-install-neo4j-service)
+- [🏗️ Core Modules](#️-core-modules)
+  - [1. 🕸️ Lifestyle Prescription Generation Module](#1-️-lifestyle-prescription-generation-module)
+    - [Configuration Steps](#configuration-steps)
+    - [Test Pipelines](#test-pipelines)
+  - [2. 🧠 Diet/Exercise Sub-world model and Ranking Module](#2--dietexercise-sub-world-model-and-ranking-module)
+  - [3. 🛡️ Safety Module](#3-️-safety-module)
+  - [4. 🧬 Multi-omics Model](#4--multi-omics-model)
+  - [5. 🥽 AR Deployment](#5--ar-deployment)
+    - [Hardware / Platform](#hardware--platform)
+    - [Software Environment](#software-environment)
+    - [Dependencies](#dependencies)
+      - [A. Vuplex 3D WebView (Required, Not Included)](#a-vuplex-3d-webview-required-not-included)
+      - [B. XREAL XR Plugin (Required, Provided in the External Unity Archive)](#b-xreal-xr-plugin-required-provided-in-the-external-unity-archive)
+      - [C. Unity Package Manager Dependencies (Auto-installed)](#c-unity-package-manager-dependencies-auto-installed)
+    - [Project Setup](#project-setup)
+      - [4.1 Configure the WebView Initial URL](#41-configure-the-webview-initial-url)
+      - [4.2 (Optional) Configure iFLYTEK Speech Recognition](#42-optional-configure-iflytek-speech-recognition)
+    - [Build APK](#build-apk)
+      - [Pre-build Checklist](#pre-build-checklist)
+      - [Build Steps in Unity (Android)](#build-steps-in-unity-android)
+    - [Troubleshooting](#troubleshooting)
+- [📊 Minimal Dataset](#-minimal-dataset)
+- [📄 License](#-license)
 
+## 🌟 Overview
+
+This repository contains the Python code and sample dataset for the paper **"A metabolic world model system for personalised lifestyle medicine"**. The Unity AR client is distributed separately as the external `XLIFE-AR.zip` archive described below.
+
+
+## 🚀 Quick Start
+
+### System Requirements
+
+#### Software Dependencies
+- **Python**: 3.10+
+- **PyTorch**: 2.7.0
+- **JDK**: 17.0.18+
+- **Unity3D**: 2022.3.x
+- **Neo4j**: 5.26.21+
+
+#### Hardware Requirements
+- **Training**: NVIDIA A800 or equivalent GPU
+- **AR Deployment**: Android 14+ compatible device
+
+### Installation
+
+#### 1. Clone the Repository
 ```bash
-export XLIFE_USE_LLM_ACTION_ENCODERS=0
-export XLIFE_LLM_URL=http://127.0.0.1:8765
-python 'world_model+ranking_module/inference.py' \
-  --data ../data/xlife_cleaned_0207.json \
-  --checkpoint outputs/exp_1029_v1/subject_fusion_d64/best.pt \
-  --mode joint --ranking random --count 5 --output outputs/inference/joint.json
+git clone https://github.com/2025XLife/X-Life.git
+cd X-Life
 ```
 
-流程：真实事件屏蔽动作 → 独立需求生成候选 → 世界模型模拟 → 排序 → 硬规则与语义审查 → 安全 Top 3。生成端仅收到 subject_id、origin、历史 CGM/mask、metadata；原餐食/运动/动作文本/onset/未来标签均不传递。
-
-- `--ranking learned` 默认要求已训练的对应模式排名，不回退到安全评分。`--ranking random` 明确标记 test_only。
-- `--mode joint` 要求融合产物；单域 checkpoint 只能模拟已训练域。
-- `--source-mode diet|exercise`、`--subject-id`、`--sample-index` 选择真实事件；候选模式可与来源独立。
-- `--requirement requirement.json` 替换固定 seed 的随机结构化需求；`--candidates candidates.json` 接收已有候选；`--extract-actions` 调用 HTTP 显式提取。
-- `--constraints constraints.json` 配置过敏、禁用运动、定量上限和联合时间约束；不从未命名 metadata 数组推断疾病。
-- `--knowledge graph.json` 使用有来源的知识快照；缺图谱明确记录 knowledge_missing。
-
-输出包含共享 context hash、每候选的动作/潜轨迹/预测/安全结论、来源、失败原因和耗时。不足三个输出实际数量，无通过者输出空集。处方格式、合理性和安全规则全部由同级 extra_code 服务实现；仓库内 generation/safety 仅发起 HTTP 请求。服务失联记录失败状态，最终推荐依据服务返回的决策。
-
-处方处理端口为 `/v1/candidate/prepare`，完整安全评估端口为 `/v1/safety/evaluate`，与其余角色共用服务地址。
-
-论文动作编码路径使用全参数微调的 Qwen2.5-VL、末层均值池化、显式生理因素与独立 latent effector 的联合动作投影。启用 XLIFE_USE_LLM_ACTION_ENCODERS=1，配置匹配的 action_backend_id 并重新训练世界模型；不能直接切换数值或旧 HTTP latent checkpoint。显式因素名称、单位、缩放与维度由 HTTP 返回的 factor_schema 决定，latent 为末层输入隐藏状态的掩码均值池化结果。完整 72B 模型已由项目团队核验。仅因素投影的旧 HTTP checkpoint 需重新训练。
-
-## 训练与评估
-
+#### 2. Create Python Environment
 ```bash
-python 'world_model+ranking_module/train.py' --data ../data/xlife_cleaned_0207.json \
-  --config configs/numeric64.json --phase single --domain both \
-  --epochs 60 --batch-size 16 --device cuda --output outputs/single
-python 'world_model+ranking_module/train.py' --data ../data/xlife_cleaned_0207.json \
-  --phase fusion --init-checkpoint outputs/single/best.pt \
-  --epochs 40 --batch-size 16 --device cuda --output outputs/fusion
-python 'world_model+ranking_module/experiment.py' --data ../data/xlife_cleaned_0207.json \
-  --models persistence linear dlinear world --config configs/numeric64.json \
-  --seeds 42 43 44 45 46 --epochs 10 --device cuda --output outputs/protocol
-python -m unittest discover -s 'world_model+ranking_module' -p 'test_*.py'
+# Using conda (recommended)
+conda create -n xlife python=3.10 -y
+conda activate xlife
 ```
 
-排序采用标准 DPO：无界内部 logits 定义候选选择策略，针对冻结参考策略优化偏好对，结果只输出排序、不输出数值分数。在同一 train.py 使用 --phase professional，再 --phase physiological，--data 传离线偏好对。单域与融合训练产生的随机 ranking 头不代表训练过的排名。
+#### 3. Install Python Dependencies
+```bash
+pip install -r requirements.txt
+```
 
-experiment.py 固定 participant 80/20，训练参与者内部留出晚期事件并清除六小时重叠窗口，分别报告 seen/unseen。归一化仅拟合训练事件。报告各模式/历史缺失/MAE/逐曲线 Pearson/预测时段/耗时/CUDA 峰值。默认 unseen 为零样本，--adapt-epochs 单独记录参与者事实微调与清除重叠后的晚期评估。
+#### 4. Install Neo4j Service
+```bash
+# Install JDK
+sudo apt install openjdk-17-jdk
+# Verify JDK version
+java -version
+```
 
-CBG/夜间仅实现显式时间锚点、单位和观测来源的任务校验，当前实际数据没有经确认的 bedtime/wake 标签，未训练或验证整夜预测。模型改动和验收边界见 [方法说明](docs/METHOD.md)。
+Download the Neo4j Community 5.26.21 tarball from the [Neo4j Deployment Center](https://neo4j.com/deployment-center/?gdb-selfmanaged) and start the service:
+```bash
+tar zxf neo4j-community-5.26.21-unix.tar.gz
+cd neo4j-community-5.26.21/bin/
+./neo4j start
+```
 
-旧 v2 agents、trainer 和模型配置迁至同级 extra_code/legacy_xlife 保存，不再进入默认导入路径。v2 checkpoint 不兼容。完整 72B 模型已核验；图谱完整性及五次全量研究实验须另行验证。
+## 🏗️ Core Modules
 
-Ranking 版本已更新为 2。旧 single/fusion 产物可用于初始化；旧有界分数对齐产物需要从 fusion 重新训练排序头，不能继续原对齐训练。
-## 服务端监督与检索 schema
 
-辅助监督与个体化知识检索统一从服务的 `POST /v1/schema` 读取策略。服务通过 `--schema` 选择 JSON 文件；字段路径、目标形状、损失权重和检索查询来源均在服务端设定，见 [RUNTIME_SCHEMA.md](docs/RUNTIME_SCHEMA.md)。
+### 1. 🕸️ Lifestyle Prescription Generation Module
 
+The knowledge-graph-guided lifestyle prescription generation module generates personalized diet and exercise prescriptions by grounding LLM outputs in a hybrid vector-graph metabolic knowledge base, safeguarded by a safety module that enforces clinical safety through semantic auditing and deterministic constraints.
+
+#### Configuration Steps
+
+**1. Configure Database and Models**
+The maintained role service reads model paths, API role settings, device assignments and supervision/retrieval schemas from [example_config.json](./example_config.json). Set the API credential in the environment variable named by the configuration, then start the service from the workspace root:
+
+```bash
+python extra_code/server.py --config X-Life-2/example_config.json
+```
+
+**2. Prepare Guidelines**
+Prepare guidelines following the descriptions in our paper:
+```
+kg_agents/
+└── data/
+    ├── diet/
+    │   ├── diet_guideline_1.pdf
+    │   └── ...
+    └── exer/
+        ├── exercise_guideline_1.pdf
+        └── ...
+```
+
+**3. Extract and Embed Entities**
+Make sure the Neo4j server has started:
+```bash
+cd kg_agents
+# Extract knowledge from ./data
+python -m core.build_kg_2_steps
+# Import knowledge graph
+python -m core.import_kg
+# (Optional) Embedding knowledge graph
+python -m core.embed_kg
+```
+
+#### Test Pipelines
+
+**Generation and Assessment Pipelines**
+```bash
+# Run these commands from the repository root.
+cd kg_agents
+# Test diet prescription pipeline
+python -m pipeline.diet_pipeline --bn 1 --vn 5 --query "I want a sandwich with just veggies, no meat." --use_vector --rag_topk 5
+# Test exercise prescription pipeline
+python -m pipeline.exer_pipeline --bn 1 --vn 4 --query "I want to do some back exercises at the gym." --use_vector --rag_topk 5
+```
+
+**Start Flask Service**
+
+Set `world_model.checkpoint_path` to the trained ranking checkpoint. For `/diet/generate` and `/exercise/generate`, include the current event as `world_model_context` with `subject_id`, `metadata`, `sleep_data` and `cgm_pre`.
+
+```bash
+cd kg_agents
+python server.py
+```
+
+**API Interface Testing**
+```bash
+# Diet prescription generation
+curl -X POST http://localhost:5000/api/v1/diet/generate-only \
+  -H "Content-Type: application/json" \
+  -d '{"user_metadata":{},"user_requirement":{},"user_query":"a balanced lunch"}'
+
+# Exercise prescription generation
+curl -X POST http://localhost:5000/api/v1/exercise/generate-only \
+  -H "Content-Type: application/json" \
+  -d '{"user_metadata":{},"user_requirement":{},"user_query":"a moderate walk"}'
+
+# Safety module assess prescription
+curl -X POST http://localhost:5000/api/v1/safety/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "plan_type": "diet",
+    "user_metadata": {},
+    "plan": {}
+  }'
+```
+
+For detailed prompt sample of prescription generation, prescription assessment and knowledge graph extraction, you can refer to [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md)
+
+### 2. 🧠 Diet/Exercise Sub-world model and Ranking Module
+
+Diet/Exercise sub-world models simulate future glucose trajectories and rank candidate diet and exercise prescriptions using lifestyle records and physiological data.
+
+**1. Data Preparation**
+
+Prepare participant metadata, meal images and descriptions, exercise records and CGM trajectories following [minimal_dataset/sample_data.json](./minimal_dataset/sample_data.json). Provide the corresponding training annotations and preference pairs for encoder pre-training and alignment.
+
+**2. Model Configuration**
+
+Edit [example_config.json](./example_config.json) to configure the model, data windows, training, alignment, inference and external role service. All maintained Python entry points read this file relative to the repository, independently of the current working directory. Use `--config /path/to/config.json` or `XLIFE_CONFIG` to select another complete configuration. Missing required fields raise an error; Python code does not supply model or training parameter values.
+
+```bash
+python 'world_model+ranking_module/train.py' --config example_config.json --help
+```
+
+> **Note** The Qwen2.5-VL-72B-Instruct backbone used for diet-action representation is supervised fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods. The resulting diet-information-tuned model (together with its projection head) is the intended diet action encoder.
+**3. Training**
+
+Run the following commands from the repository root with your training data:
+
+```bash
+python 'world_model+ranking_module/encode_annotations.py' \
+  --input data/annotations.json --output data/train.json \
+  --config example_config.json
+
+python 'world_model+ranking_module/train_action_encoder.py' --config example_config.json \
+  --domain diet --data data/diet_annotations.json --backend-id diet-encoder-v1 --output outputs/diet_encoder
+
+python 'world_model+ranking_module/train.py' --config example_config.json \
+  --phase single --data data/train.json --output outputs/world
+```
+
+**4. Multi-stage Alignment**
+
+Train fusion after both single domains, then align the ranking head through professional and physiological preferences. User feedback has a separate entry point:
+
+```bash
+python 'world_model+ranking_module/train.py' --config example_config.json \
+  --phase fusion --data data/train.json --init-checkpoint outputs/world/checkpoint.pt --output outputs/fusion
+
+python 'world_model+ranking_module/train.py' --config example_config.json \
+  --phase professional --data data/professional_pairs.json --init-checkpoint outputs/fusion/checkpoint.pt \
+  --output outputs/professional
+```
+
+For physiological alignment, use `--phase physiological`, initialize from the professional checkpoint and supply `--replay-data`. For user feedback, run `train_user_feedback.py --config example_config.json` with the physiological checkpoint and both replay datasets.
+
+Training options are available through `python 'world_model+ranking_module/train.py' --help`. Set `http.use_llm_action_encoders` and `model.action_backend_id` in the configuration to use matching HTTP action artifacts. Set model paths, role settings, device assignments and supervision/retrieval schemas in the same file before starting `../extra_code/server.py --config example_config.json`. API credentials are read only from the environment variable named in the configuration.
+
+### 3. 🛡️ Safety Module
+
+A safety module based on retrieval-augmented generation enforces safety constraints for lifestyle prescriptions. Configure its API role and retrieval schema in [example_config.json](./example_config.json). The maintained prompts and review service are in the sibling `extra_code` directory.
+
+### 4. 🧬 Multi-omics Model
+
+Structured omics annotations provide auxiliary supervision during world-model training. The omics prediction head is removed during inference. See [docs/METHOD.md](./docs/METHOD.md) for the training procedure.
+
+### 5. 🥽 AR Deployment
+
+The external Unity project targets **XREAL AR** devices to:
+- Embed a web page as the main UI via **Vuplex 3D WebView** (WebView scene)
+- Trigger **XREAL RGB Camera** capture / screen recording from the web page (camera capture scene)
+- Send capture results (photos/videos, local file paths / local HTTP URLs, etc.) back to the web page via `postMessage`
+
+#### Hardware / Platform
+
+- Target platform: Android
+- Device: XREAL devices / runtimes that support XREAL XR Plugin (and any Android device that can install an APK)
+- Debugging: USB cable + USB debugging enabled (required for Build & Run)
+
+
+#### Software Environment
+
+- **Unity**: `2022.3.x` (this project uses `2022.3.61t8` in `ProjectSettings/ProjectVersion.txt`)
+- **Unity Hub modules**: Android Build Support (SDK / NDK / OpenJDK)
+- **Optional**: `adb` (usually not needed if you use Unity's Build & Run; needed for CLI install/debugging)
+- **Download**: Please download the complete Unity project [XLIFE-AR.zip](https://drive.google.com/file/d/1Ul-z-lDQSRvFw9aqk6uxIVhMamKpvAJM/view?usp=sharing)
+
+#### Dependencies
+
+The Python/Neo4j modules in this repository are separate from the Unity client. The Unity project is distributed as the external `XLIFE-AR.zip` archive linked below; Unity `Assets/`, `Packages/`, and `ProjectSettings/` are not included in this repository.
+
+> The two most common blockers are: **Vuplex (commercial, not included in the repo)** + **XREAL XR Plugin (provided as a local tar package)**.
+
+##### A. Vuplex 3D WebView (Required, Not Included)
+
+- Purchase and import (Unity Asset Store): [Vuplex 3D WebView for Android (with Gecko Engine)](https://assetstore.unity.com/packages/tools/network/vuplex-3d-webview-for-android-with-gecko-engine-245867)
+- After importing, you should see: `Assets/Vuplex/WebView/...`, and be able to use `CanvasWebViewPrefab` in scenes
+- Note: if you want to run WebView directly in the macOS/Windows Editor, you may need to install the native plugins for those platforms per Vuplex docs; building for Android only is fine
+
+##### B. XREAL XR Plugin (Required, Provided in the External Unity Archive)
+
+- Included in the external `XLIFE-AR.zip` archive: `Packages/com.xreal.xr.tar.gz`
+- The external Unity project's `Packages/manifest.json` references the local package: `"com.xreal.xr": "@com.xreal.xr.tar.gz"`
+- To upgrade the plugin: replace `Packages/com.xreal.xr.tar.gz` and keep the `manifest.json` reference consistent
+
+##### C. Unity Package Manager Dependencies (Auto-installed)
+
+After opening the project, Unity resolves dependencies from `Packages/manifest.json` automatically (e.g., Input System / AR Foundation / XR Interaction Toolkit). In most cases you do not need to install anything manually in Package Manager.
+
+#### Project Setup
+
+##### 4.1 Configure the WebView Initial URL
+
+1. Open the scene: `Assets/Scenes/WebView.unity`
+2. Select `CanvasWebViewPrefab` in the scene hierarchy
+3. Set `InitialUrl` to your web URL
+   - Current example value: `https://xlife.chat/MainPage/AR`
+
+##### 4.2 (Optional) Configure iFLYTEK Speech Recognition
+
+**REQUIRED if you want to use speech recognition features.**
+
+The speech recognition config file is: `Assets/Resources/XunfeiConfig.json`
+
+1. Register at [iFLYTEK Open Platform](https://www.xfyun.cn/) and create an application
+2. Obtain your API credentials (appId, apiKey, apiSecret)
+3. Edit `Assets/Resources/XunfeiConfig.json` and fill in:
+   - `appId`: Your application ID
+   - `apiKey`: Your API Key
+   - `apiSecret`: Your API Secret
+
+Alternatively, you can create a ScriptableObject config in Unity Editor:
+
+- Right-click in Project window → Create → XLIFE AR → Xunfei Speech Recognition Config
+- Set the credentials in the Inspector
+- Place the config asset in `Assets/Resources/` folder
+
+#### Build APK
+
+##### Pre-build Checklist
+
+- Vuplex is imported correctly (otherwise you will see compilation errors like missing `Vuplex.WebView` namespace)
+- `Packages/com.xreal.xr.tar.gz` exists and Unity Package Manager shows no errors
+- Scenes are included in Build Settings (this project should already be configured, but double-check):
+  - `Assets/Scenes/WebView.unity`
+  - `Assets/Scenes/RGBCameraAndCapture.unity`
+
+##### Build Steps in Unity (Android)
+
+1. `File -> Build Settings...`
+2. Select `Android`, then click `Switch Platform`
+3. In `Scenes In Build`, make sure `WebView` and `RGBCameraAndCapture` are enabled (recommended: put `WebView` first)
+4. `Edit -> Project Settings -> XR Plug-in Management`
+   - In the `Android` tab, enable **XREAL** (XREAL XR Loader)
+5. `Player Settings -> Other Settings` (recommended values; adjust as needed)
+   - `Scripting Backend`: IL2CPP
+   - `Target Architectures`: ARM64
+6. Connect an Android device (Developer Mode + USB debugging enabled), then click `Build And Run`
+   - Or click `Build` to export an `.apk` and install it manually
+
+> Note: this project includes a custom manifest at `Assets/Plugins/Android/AndroidManifest.xml`, which declares network/microphone/screen-capture related permissions, including the Android 14+ foreground service permission `FOREGROUND_SERVICE_MEDIA_PROJECTION`.
+
+#### Troubleshooting
+
+- `The type or namespace name 'Vuplex' could not be found`: Vuplex 3D WebView is not imported
+- WebView is blank / cannot load: check `InitialUrl`, device network, and whether cleartext HTTP is allowed (if using `http`)
+- Camera / screen recording does not work in Editor: XREAL capture APIs typically only work on real Android devices (there is also a mock branch in scripts)
+- Screen recording issues on Android 14+: make sure you did not overwrite/remove the foreground service permission declarations in `Assets/Plugins/Android/AndroidManifest.xml`
+
+
+## 📊 Minimal Dataset
+
+The minimal dataset is available at [`./minimal_dataset/`](./minimal_dataset/). It contains three pseudonymous participants with:
+
+- 2 meal events and four meal photographs;
+- 2 exercise events with pre/post-event CGM trajectories;
+- 2 nocturnal windows with rule-derived hypoglycemia labels;
+- `manifest.json` with event counts and image hashes.
+
+Data descriptions are provided in [minimal_dataset/README.md](./minimal_dataset/README.md).
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

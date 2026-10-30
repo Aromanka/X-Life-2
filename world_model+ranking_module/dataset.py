@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from dataset_metadata import prepare_metadata
 from runtime_schema import supervision_values
+from configuration import settings
 
 
 def numeric_value(value):
@@ -23,14 +24,16 @@ def event_timestamp(date, time):
 
 
 def cgm_window(points, origin, future=False):
-    values, mask = torch.zeros(36), torch.zeros(36, dtype=torch.bool)
+    count = settings('data', 'horizon_steps' if future else 'history_steps')
+    interval = settings('data', 'interval_minutes')
+    values, mask = torch.zeros(count), torch.zeros(count, dtype=torch.bool)
     for point in points or []:
         if not isinstance(point, (list, tuple)) or len(point) != 2: continue
         timestamp, value = event_timestamp('', point[0]), numeric_value(point[1])
         if timestamp is None or not math.isfinite(value): continue
         minutes = (timestamp - origin).total_seconds() / 60
-        slot = math.ceil(minutes / 5) - 1 if future else math.floor(minutes / 5) + 36
-        if (0 < minutes <= 180 if future else -180 <= minutes < 0) and 0 <= slot < 36:
+        slot = math.ceil(minutes / interval) - 1 if future else math.floor(minutes / interval) + count
+        if (0 < minutes <= count*interval if future else -count*interval <= minutes < 0) and 0 <= slot < count:
             values[slot], mask[slot] = value, True
     return values, mask
 

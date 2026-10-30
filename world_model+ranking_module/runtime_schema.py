@@ -27,7 +27,7 @@ def load_schema(backend=None):
         if spec['readout'] not in ('sequence', 'pooled'): raise ValueError('Invalid supervision readout')
         if not isinstance(spec['path'], list) or not spec['path']: raise ValueError('Supervision path must be a nonempty list')
         if spec.get('mask') is not None and not isinstance(spec['mask'], list): raise ValueError('Mask path must be a list')
-        if not isinstance(spec.get('scale', 1.), str) and (not math.isfinite(spec.get('scale', 1.)) or spec.get('scale', 1.) <= 0): raise ValueError('Invalid supervision scale')
+        if not isinstance(spec['scale'], str) and (not math.isfinite(spec['scale']) or spec['scale'] <= 0): raise ValueError('Invalid supervision scale')
     for spec in schema['retrieval'].values():
         if spec['strategy'] not in ('vector', 'exact', 'substring') or type(spec['limit']) is not int or spec['limit'] < 1: raise ValueError('Invalid retrieval strategy')
         if not isinstance(spec['paths'], list) or any(not isinstance(p, list) for p in spec['paths']): raise ValueError('Retrieval paths must be lists')
@@ -76,7 +76,7 @@ def supervision_loss(model, rows, output, mode):
             elif trajectory.size(1) != spec['shape'][0]: raise ValueError('Sequence target length differs from trajectory')
             prediction = model.supervision_heads[name][mode](trajectory).reshape_as(target)
         if prediction.shape != target.shape: raise ValueError('Prediction shape differs from supervision')
-        scale = getattr(model, spec['scale']) if isinstance(spec.get('scale'), str) else spec.get('scale', 1.)
+        scale = getattr(model, spec['scale']) if isinstance(spec['scale'], str) else spec['scale']
         error = (prediction[mask] - target[mask]) / scale
         losses.append(spec['weight'] * (error.square() if spec['loss'] == 'mse' else error.abs()).mean())
     if not losses: raise ValueError('No observed supervision targets')
