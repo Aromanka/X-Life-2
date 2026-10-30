@@ -5,7 +5,10 @@
     "heads": 4,
     "layers": 2,
     "patch_size": 6,
-    "action_backend_id": null,
+    "action_backend_id": {
+      "diet": "diet-encoder-v1",
+      "exercise": "exercise-encoder-v1"
+    },
     "state_pooling": "both",
     "gap_feature": true,
     "readout": "direct",
@@ -130,21 +133,24 @@
     "chunk_chars": 12000,
     "strategy": "generation",
     "limit": 8,
-    "dimension": 128
+    "dimension": 4096
   },
   "http": {
     "url": "http://127.0.0.1:8765",
     "timeout": 600,
-    "use_llm_action_encoders": false
+    "use_llm_action_encoders": true
   },
   "server": {
     "backend": "api",
-    "latent": "random",
-    "latent_id": "random-latent-v1",
+    "latent": "encoder",
+    "latent_id": "Qwen/Qwen3-Embedding-8B",
+    "embedding_model": "Qwen/Qwen3-Embedding-8B",
+    "embedding_device": "cpu",
+    "embedding_query_instruction": "Given a user's metabolic health context and lifestyle requirements, retrieve relevant medical entities and lifestyle guidance.",
     "local_model": "/path/to/local/text-model",
     "device": "cpu",
-    "diet_encoder": null,
-    "exercise_encoder": null,
+    "diet_encoder": "outputs/diet_encoder",
+    "exercise_encoder": "outputs/exercise_encoder",
     "metadata_model": "Qwen/Qwen3-32B",
     "max_tokens": 4096,
     "host": "127.0.0.1",
@@ -160,7 +166,8 @@
     "mock_action_latent_dimension": 8,
     "mock_metadata_dimension": 8,
     "mock_action_backend_id": "mock-action-factors",
-    "mock_metadata_backend_id": "mock-metadata"
+    "mock_metadata_backend_id": "mock-metadata",
+    "mock_embedding_backend_id": "mock-knowledge-embedding"
   },
   "upstream": {
     "base_url": "https://api.deepseek.com/v1",
@@ -299,7 +306,7 @@
             "constraints"
           ]
         ],
-        "dimension": 128,
+        "dimension": 4096,
         "limit": 8
       },
       "safety": {

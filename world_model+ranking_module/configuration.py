@@ -6,10 +6,11 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / 'example_config.json'
 _config = None
+_config_path = None
 
 
 def configure(path=None):
-    global _config
+    global _config, _config_path
     source = Path(path or os.environ.get('XLIFE_CONFIG') or CONFIG_PATH).resolve()
     try:
         config = json.loads(source.read_text(encoding='utf-8'))
@@ -18,7 +19,15 @@ def configure(path=None):
     if not isinstance(config, dict):
         raise ValueError('Configuration must be a JSON object')
     _config = config
+    _config_path = source
     return deepcopy(config)
+
+
+def resolve_config_path(path):
+    """Resolve local artifact paths relative to the selected configuration file."""
+    if _config_path is None: configure()
+    value = Path(path).expanduser()
+    return (value if value.is_absolute() else _config_path.parent/value).resolve()
 
 
 def settings(*keys):

@@ -118,9 +118,16 @@ class MetabolicWorldModel(nn.Module):
                 time_encoding_base=self.model_settings['time_encoding_base']) for name in ('diet','exercise','joint')})
         if self.llm_actions:
             if not action_backend_id: raise ValueError('Configure action_backend_id for HTTP action encoders')
+            if isinstance(action_backend_id, str):
+                action_ids = {domain: action_backend_id for domain in ('diet', 'exercise')}
+            elif isinstance(action_backend_id, dict) and set(action_backend_id) == {'diet', 'exercise'}:
+                action_ids = action_backend_id
+            else: raise ValueError('action_backend_id requires a shared string or diet/exercise artifact IDs')
+            if any(not isinstance(value, str) or not value.strip() for value in action_ids.values()):
+                raise ValueError('Action artifact IDs must be nonempty strings')
             from backends.action_encoder import HTTPActionEncoder
-            self.diet_vlm = HTTPActionEncoder('diet', dimension, action_backend_id)
-            self.exercise_vlm = HTTPActionEncoder('exercise', dimension, action_backend_id)
+            self.diet_vlm = HTTPActionEncoder('diet', dimension, action_ids['diet'])
+            self.exercise_vlm = HTTPActionEncoder('exercise', dimension, action_ids['exercise'])
         self.ranking_head = RankingHead(dimension, heads, layers, self.model_settings)
         self.register_buffer('ranked_modes', torch.zeros(3, dtype=torch.bool))
 

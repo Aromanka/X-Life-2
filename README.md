@@ -213,6 +213,12 @@ python 'world_model+ranking_module/train.py' --config example_config.json --help
 
 Run the following commands from the repository root with your training data:
 
+Start the role server in a separate terminal first. Action models load on demand, so the service can run during annotation and encoder training; both action artifact directories must exist before world-model training.
+
+```bash
+python ../extra_code/server.py --config example_config.json
+```
+
 ```bash
 python 'world_model+ranking_module/encode_annotations.py' \
   --input data/annotations.json --output data/train.json \
@@ -220,6 +226,9 @@ python 'world_model+ranking_module/encode_annotations.py' \
 
 python 'world_model+ranking_module/train_action_encoder.py' --config example_config.json \
   --domain diet --data data/diet_annotations.json --backend-id diet-encoder-v1 --output outputs/diet_encoder
+
+python 'world_model+ranking_module/train_action_encoder.py' --config example_config.json \
+  --domain exercise --data data/exercise_annotations.json --backend-id exercise-encoder-v1 --output outputs/exercise_encoder
 
 python 'world_model+ranking_module/train.py' --config example_config.json \
   --phase single --data data/train.json --output outputs/world
@@ -242,11 +251,13 @@ For physiological alignment, use `--phase physiological`, initialize from the pr
 
 The ranking head produces unbounded logits. All alignment stages compute DPO from policy and frozen-reference log-softmax probabilities; their pairwise differences equal logit differences. At inference, `model.rank` returns softmax scores over one complete candidate set sharing the same user state. The ranking CLI collects logits across batches before normalization and writes `scores` in candidate input order. Recommendation output exposes `ranking_score` for learned ranking, normalized across all successfully simulated candidates before safety filtering and Top-K selection. Scores sum to one over that set and depend on its composition; they are not absolute suitability or safety probabilities. Internal logits remain unbounded and are not exported. Ranking v2 checkpoint weights and alignment resume semantics are unchanged.
 
-Training options are available through `python 'world_model+ranking_module/train.py' --help`. Set `http.use_llm_action_encoders` and `model.action_backend_id` in the configuration to use matching HTTP action artifacts. Set model paths, role settings, device assignments and supervision/retrieval schemas in the same file before starting `../extra_code/server.py --config example_config.json`. API credentials are read only from the environment variable named in the configuration.
+Training options are available through `python 'world_model+ranking_module/train.py' --help`. LLM action encoders are enabled by default. The default server loads `outputs/diet_encoder` and `outputs/exercise_encoder` relative to the selected configuration file, using the separately trained artifacts above. `model.action_backend_id` specifies each domain's expected artifact ID; existing configurations with a shared string ID remain supported. Configure model paths, role settings, device assignments and supervision/retrieval schemas before starting `../extra_code/server.py --config example_config.json`. Missing artifacts or mismatched IDs raise an error. Existing numeric-action world-model checkpoints require explicitly setting `http.use_llm_action_encoders` to false (or `XLIFE_USE_LLM_ACTION_ENCODERS=0`); using the LLM action representation requires training the world model with that representation. API credentials are read only from the environment variable named in the configuration.
 
 ### 3. 🛡️ Safety Module
 
 A safety module based on retrieval-augmented generation enforces safety constraints for lifestyle prescriptions. Configure its API role and retrieval schema in [example_config.json](./example_config.json). The maintained prompts and review service are in the sibling `extra_code` directory.
+
+Knowledge retrieval uses the manuscript's Qwen3-Embedding-8B by default. Configure `server.embedding_model` (a Hugging Face model ID or local directory), `server.embedding_device`, `server.embedding_max_length` and `server.embedding_query_instruction` in the same configuration file. Both knowledge retrieval dimensions are 4096; the world-model dimension remains independent. The service uses query instructions, last-token pooling and normalized embeddings as documented in the [official model card](https://huggingface.co/Qwen/Qwen3-Embedding-8B). Graph entity embeddings are indexed in memory and queried by cosine similarity. `--backend mock` is an explicitly marked test path; the normal service does not replace encoder failures with random vectors.
 
 ### 4. 🧬 Multi-omics Model
 
