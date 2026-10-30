@@ -5,6 +5,7 @@ from torch import nn
 from model import CGMTransformerEncoder, transformer_encoder, causal_mask
 from backends.metadata_encoder import SemanticMetadataEncoder
 from configuration import configured, settings
+from action_inputs import action_inputs
 
 
 def ranking_probabilities(logits):
@@ -143,7 +144,7 @@ class MetabolicWorldModel(nn.Module):
         phase = minutes[:, None]/self.data_config['interval_minutes'] * frequencies
         return torch.stack([phase.sin(), phase.cos()], -1).flatten(-2)[:, :dimension]
 
-    def initial_states(self, batch):
+    def initial_states(self, batch, mode):
         mask, history = batch['history_mask'], batch['history']
         values = (history-self.glucose_mean)/self.glucose_scale
         encoded = self.cgm_encoder(values, mask)
@@ -158,15 +159,24 @@ class MetabolicWorldModel(nn.Module):
         if self.state_pooling == 'recent': pooled = torch.zeros_like(pooled)
         gap = (history.size(1)-1-last_index)[:, None]/history.size(1) if self.gap_feature else torch.zeros_like(last_index[:,None])
         state = self.state_projection(torch.cat([pooled, recent, self.metadata_encoder(batch['metadata']), ((last-self.glucose_mean)/self.glucose_scale)[:, None], gap], -1))
+        inputs = []
         if self.llm_actions:
-            diet = self.diet_vlm(batch['diet_text'], batch.get('diet_images'))
-            exercise = self.exercise_vlm(batch['exercise_text'])
-        else:
-            diet = self.diet_encoder(batch['diet'])
-            exercise = self.exercise_encoder(batch['exercise']) + self.type_embedding(batch['type_id'])
-        diet = diet + self.time_encoding(batch['onset'][:, 0], self.dimension)
-        exercise = exercise + self.time_encoding(batch['onset'][:, 1], self.dimension)
-        return self.diet.conditioning(torch.cat([state, diet], -1)), self.exercise.conditioning(torch.cat([state, exercise], -1)), last
+            for i in range(len(history)):
+                action = {key:batch[key][i].detach().cpu().tolist() for key in ('diet', 'exercise', 'onset')}
+                action.update(mode=mode, diet_text=batch['diet_text'][i], exercise_text=batch['exercise_text'][i], diet_images=batch.get('diet_images', [[] for _ in history])[i])
+                inputs.append(action_inputs(action))
+        states = {}
+        for index, domain in enumerate(('diet', 'exercise')):
+            if mode not in (domain, 'joint'): continue
+            if self.llm_actions:
+                texts = [row[domain+'_text'] for row in inputs]
+                action = self.diet_vlm(texts, [row['diet_images'] for row in inputs]) if domain == 'diet' else self.exercise_vlm(texts)
+            else:
+                action = getattr(self, domain+'_encoder')(batch[domain])
+                if domain == 'exercise': action = action + self.type_embedding(batch['type_id'])
+            action = action + self.time_encoding(batch['onset'][:, index], self.dimension)
+            states[domain] = getattr(self, domain).conditioning(torch.cat([state, action], -1))
+        return states.get('diet'), states.get('exercise'), last
 
     def initialize_fusion(self):
         with torch.no_grad(): self.fusion.basis.copy_(torch.block_diag(self.diet.basis, self.exercise.basis))
@@ -197,7 +207,7 @@ class MetabolicWorldModel(nn.Module):
     def forward(self, batch, mode, horizon=None):
         horizon = self.data_config['horizon_steps'] if horizon is None else horizon
         if mode not in {'diet', 'exercise', 'joint'} or horizon < 1: raise ValueError('Invalid mode or horizon')
-        diet, exercise, last = self.initial_states(batch)
+        diet, exercise, last = self.initial_states(batch, mode)
         state = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
         states, gates = [], []
         for _ in range(horizon):

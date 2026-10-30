@@ -11,7 +11,8 @@ from torch.utils.data import DataLoader, Dataset
 from train_data import read_records, ReplayPairs
 from dataset_metadata import prepare_metadata
 from configuration import settings, optimizer_settings
-from world_model import ranking_probabilities
+from world_model import ranking_probabilities, llm_actions_enabled
+from action_inputs import action_inputs
 
 
 MODES = ('diet', 'exercise', 'joint')
@@ -34,13 +35,11 @@ def candidate(context, action, vocabulary):
         values = action.get(name, [None]*size)
         sample[name] = torch.tensor([float('nan') if v is None else v for v in values], dtype=torch.float32)
         if sample[name].shape != (size,) or torch.isinf(sample[name]).any(): raise ValueError('Invalid action values')
-        if (mode == name or mode == 'joint') and not torch.isfinite(sample[name]).any(): raise ValueError('Active action requires observed values')
+        if not llm_actions_enabled() and mode in (name, 'joint') and not torch.isfinite(sample[name]).any(): raise ValueError('Active action requires observed values')
     sample['onset'] = torch.tensor(action['onset'], dtype=torch.float32)
     if sample['onset'].shape != (2,) or not torch.isfinite(sample['onset']).all(): raise ValueError('Two finite onset offsets are required')
     sample['type_id'] = torch.tensor(vocabulary.get(action.get('exercise_type', ''), 0))
-    for domain in ('diet', 'exercise'):
-        sample[domain+'_text'] = action.get(domain+'_text') or (json.dumps({domain:action.get(domain), 'type':action.get('exercise_type','') if domain=='exercise' else ''}) if mode in (domain,'joint') else '')
-    sample['diet_images'] = action.get('diet_images', [])
+    sample.update(action_inputs(action))
     return sample
 
 

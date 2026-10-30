@@ -25,7 +25,7 @@ class HTTPActionEncoder(nn.Module):
         vectors = []
         for text, pictures in zip(texts, images):
             if not text.strip() and not pictures:
-                vectors.append(self.projection[-1].weight.new_zeros(self.projection[-1].out_features)); continue
+                raise ValueError(f'{self.domain}: active action requires text or images')
             envelope = HTTPBackend().call('action/factors', dict(domain=self.domain, text=text, images=pictures))
             result = envelope['result']
             if result.get('backend_id') != self.backend_id: raise ValueError('Action encoder artifact differs from checkpoint')

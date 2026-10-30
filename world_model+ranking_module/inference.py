@@ -9,14 +9,13 @@ import random
 import time
 import torch
 from collections import Counter
-from alignment import batch_candidates
+from alignment import batch_candidates, candidate
 from backends.http import HTTPBackend
 from dataset import XLifeCleanedDataset
 from generation import prepare
 from knowledge import KnowledgeGraph
 from safety import assess
 from world_model import MetabolicWorldModel, llm_actions_enabled, ranking_probabilities
-from dataset_metadata import prepare_metadata
 from runtime_schema import load_schema, retrieve
 from configuration import configured, settings, parse_configured
 
@@ -35,17 +34,7 @@ def masked_context(sample):
 
 
 def model_candidate(context,action,vocabulary):
-    """Tensor serialization of remotely prepared inputs, without prescription policy."""
-    sample={key:torch.tensor([float('nan') if v is None else v for v in values],dtype=torch.float32)
-            for key,values in {**{k:context[k] for k in ('history',)},
-                               **{k:action[k] for k in ('diet','exercise','onset')}}.items()}
-    sample['history_mask']=torch.tensor(context['history_mask'],dtype=torch.bool)
-    sample['history']=sample['history'].masked_fill(~sample['history_mask'],0.)
-    sample['type_id']=torch.tensor(vocabulary.get(action.get('exercise_type',''),0))
-    for key in ('diet_text','exercise_text'): sample[key]=action.get(key,'')
-    sample['diet_images'] = action.get('diet_images', [])
-    sample['metadata'] = prepare_metadata(context['metadata'])
-    return sample
+    return candidate(context, action, vocabulary)
 
 
 def load_model(path, device):
