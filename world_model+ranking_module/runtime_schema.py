@@ -14,7 +14,7 @@ def read_path(value, path):
 
 def load_schema(backend=None):
     schema = (backend or HTTPBackend()).call('schema', {})['result']
-    if not isinstance(schema, dict) or set(schema) != {'supervision', 'retrieval'}: raise ValueError('Schema requires supervision and retrieval')
+    if not isinstance(schema, dict) or not {'supervision', 'retrieval'} <= set(schema) or set(schema) - {'supervision', 'retrieval', 'actions'}: raise ValueError('Schema requires supervision and retrieval, with optional actions')
     if not isinstance(schema['supervision'], list) or not isinstance(schema['retrieval'], dict): raise ValueError('Invalid schema sections')
     if set(schema['retrieval']) != {'generation', 'safety'}: raise ValueError('Retrieval schema requires generation and safety')
     names = set()

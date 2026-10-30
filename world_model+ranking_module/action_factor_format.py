@@ -39,14 +39,18 @@ def number(value, unit):
     return float(value)
 
 
-def normalize(value, domain, depth=0):
+def normalize(value, domain, depth=0, schema=None):
     if depth > 8:
         raise ValueError('Action JSON nesting exceeds 8 levels')
     aliases = DIET if domain == 'diet' else EXERCISE
     units = ['g'] * 5 + ['kcal'] if domain == 'diet' else ['min', 'kcal', 'MET']
+    if schema is not None:
+        known = {names[0]:names for names in aliases}
+        aliases = [known.get(spec['name'], (spec['name'],)) for spec in schema]
+        units = [spec['unit'] for spec in schema]
     if isinstance(value, list):
         if len(value) == 1 and isinstance(value[0], (list, dict)):
-            return normalize(value[0], domain, depth+1)
+            return normalize(value[0], domain, depth+1, schema)
         if len(value) == len(aliases) and all(not isinstance(v, (dict, list)) for v in value):
             return [number(v, unit) for v, unit in zip(value, units)]
         # Lists of named factors are order independent. Arbitrary lists of food
@@ -65,7 +69,7 @@ def normalize(value, domain, depth=0):
                     if name in named:
                         raise ValueError('Duplicate named factor: ' + name)
                     named[name] = item
-            return normalize(named, domain, depth+1)
+            return normalize(named, domain, depth+1, schema)
         raise ValueError(f'Expected {len(aliases)} factors, got list length {len(value)}')
     if isinstance(value, dict):
         if domain == 'exercise' and 'intensity_scale' in value and key(value['intensity_scale']) != 'met':
@@ -75,15 +79,15 @@ def normalize(value, domain, depth=0):
             raise ValueError('Duplicate normalized factor names')
         for wrapper in ('factors', 'total_nutrition', 'nutrition', 'nutrients', 'result', 'data', 'output'):
             if wrapper in value:
-                return normalize(value[wrapper], domain, depth+1)
+                return normalize(value[wrapper], domain, depth+1, schema)
         if domain == 'diet' and 'food_items' in value:
             # Only an explicit food_items container denotes components of one
-            # meal. Every component must provide all six factors in known units.
+            # meal. Every component must provide all factors in known units.
             rows = value['food_items']
             if not isinstance(rows, list) or not rows:
                 raise ValueError('food_items must be a nonempty list')
-            vectors = [normalize(row, domain, depth+1) for row in rows]
-            return [sum(v[i] for v in vectors) for i in range(6)]
+            vectors = [normalize(row, domain, depth+1, schema) for row in rows]
+            return [sum(v[i] for v in vectors) for i in range(len(aliases))]
         factors = []
         for names, unit in zip(aliases, units):
             # Several aliases can normalize to the same key (e.g. intensity_MET).
@@ -95,7 +99,7 @@ def normalize(value, domain, depth=0):
     raise ValueError(f'Expected factor object or array, got {type(value).__name__}')
 
 
-def parse_action_factors(answer, domain):
+def parse_action_factors(answer, domain, schema=None):
     text = answer.strip()
     if text.startswith('```'):
         text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
@@ -122,7 +126,7 @@ def parse_action_factors(answer, domain):
         if len(values) != 1:
             raise ValueError(f'Expected one complete JSON value; found {len(values)}')
         value = values[0]
-    factors = normalize(value, domain)
+    factors = normalize(value, domain, schema=schema)
     # Revalidate sums as well as directly decoded vectors.
     if any(not math.isfinite(v) or v < 0 for v in factors):
         raise ValueError('Action factors must be finite nonnegative numbers')

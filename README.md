@@ -32,7 +32,7 @@ python 'world_model+ranking_module/inference.py' \
 
 处方处理端口为 `/v1/candidate/prepare`，完整安全评估端口为 `/v1/safety/evaluate`，与其余角色共用服务地址。
 
-论文动作编码路径使用全参数微调的 Qwen2.5-VL、末层均值池化、监督生理因素提取和本地动作投影。启用 XLIFE_USE_LLM_ACTION_ENCODERS=1，配置匹配的 action_backend_id 并重新训练世界模型；不能直接切换数值或旧 HTTP latent checkpoint。餐食图片、编码器训练与服务启动见 [动作编码器](docs/ACTION_ENCODERS.md)。
+论文动作编码路径使用全参数微调的 Qwen2.5-VL、末层均值池化、显式生理因素与独立 latent effector 的联合动作投影。启用 XLIFE_USE_LLM_ACTION_ENCODERS=1，配置匹配的 action_backend_id 并重新训练世界模型；不能直接切换数值或旧 HTTP latent checkpoint。显式因素名称、单位、缩放与维度由 HTTP 返回的 factor_schema 决定，latent 为末层输入隐藏状态的掩码均值池化结果。完整 72B 模型已由项目团队核验。仅因素投影的旧 HTTP checkpoint 需重新训练。
 
 ## 训练与评估
 
@@ -55,7 +55,7 @@ experiment.py 固定 participant 80/20，训练参与者内部留出晚期事件
 
 CBG/夜间仅实现显式时间锚点、单位和观测来源的任务校验，当前实际数据没有经确认的 bedtime/wake 标签，未训练或验证整夜预测。模型改动和验收边界见 [方法说明](docs/METHOD.md)。
 
-旧 v2 agents、trainer 和模型配置迁至同级 extra_code/legacy_xlife 保存，不再进入默认导入路径。v2 checkpoint 不兼容。真实大模型、图谱完整性、五次全量研究实验和论文规模动作编码器训练须另行验证。
+旧 v2 agents、trainer 和模型配置迁至同级 extra_code/legacy_xlife 保存，不再进入默认导入路径。v2 checkpoint 不兼容。完整 72B 模型已核验；图谱完整性及五次全量研究实验须另行验证。
 
 Ranking 版本已更新为 2。旧 single/fusion 产物可用于初始化；旧有界分数对齐产物需要从 fusion 重新训练排序头，不能继续原对齐训练。
 ## 服务端监督与检索 schema

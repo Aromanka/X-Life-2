@@ -141,7 +141,8 @@ class MetabolicWorldModel(nn.Module):
         if phase == 'fusion':
             self.diet.conditioning.requires_grad_(True); self.exercise.conditioning.requires_grad_(True)
         if self.llm_actions and phase == 'single':
-            self.diet_vlm.projection.requires_grad_(True); self.exercise_vlm.projection.requires_grad_(True)
+            for encoder in (self.diet_vlm, self.exercise_vlm):
+                for parameter in encoder.projection.parameters(): parameter.requires_grad = True
         if self.readout == 'autoregressive' and phase in ('single','fusion'):
             for domain in (('joint',) if phase == 'fusion' else ('diet','exercise')): self.ar_decoders[domain].requires_grad_(True)
 
@@ -181,6 +182,7 @@ class MetabolicWorldModel(nn.Module):
         return scores
 
     def load_checkpoint(self, checkpoint):
+        if self.llm_actions and any(k in checkpoint['model_state_dict'] for k in ('diet_vlm.scale', 'exercise_vlm.scale')): raise ValueError('Factor-only action checkpoints require retraining with explicit and latent effectors')
         if 'metadata_encoder.mean' in checkpoint['model_state_dict']: raise ValueError('Numeric metadata checkpoints require retraining with semantic metadata')
         if checkpoint.get('ranking_version') != 2 and (checkpoint.get('phase') in ('professional','physiological') or checkpoint['model_state_dict'].get('ranked_modes', torch.zeros(3,dtype=torch.bool)).any()):
             raise ValueError('Bounded ranking checkpoints cannot resume DPO; restart alignment from a fusion checkpoint')

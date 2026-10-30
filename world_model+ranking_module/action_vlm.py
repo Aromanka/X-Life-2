@@ -10,18 +10,23 @@ from action_factor_format import parse_action_factors
 
 class ActionVLM(nn.Module):
     """Qwen action factor extraction."""
-    def __init__(self, path, domain):
+    def __init__(self, path, domain, factor_schema=None):
         super().__init__()
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
         if domain not in ('diet', 'exercise'): raise ValueError('Expected diet or exercise')
         self.domain = domain
         self.processor = AutoProcessor.from_pretrained(path)
         self.vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(path, torch_dtype='auto')
-        self.factor_head = nn.Linear(self.vlm.config.text_config.hidden_size, 6 if domain == 'diet' else 3)
         artifact = Path(path) / 'action_factors.pt'
         self.backend_id = None
+        state = torch.load(artifact, map_location='cpu', weights_only=True) if artifact.exists() else None
+        if factor_schema is None:
+            factor_schema = state.get('factor_schema') if state else None
+            if factor_schema is None: factor_schema = json.loads((Path(__file__).resolve().parents[2]/'extra_code/schema.json').read_text(encoding='utf-8'))['actions'][domain]
+        if state and state.get('factor_schema', factor_schema) != factor_schema: raise ValueError('Action artifact factor schema mismatch')
+        self.factor_schema = factor_schema
+        self.factor_head = nn.Linear(self.vlm.config.text_config.hidden_size, len(factor_schema))
         if artifact.exists():
-            state = torch.load(artifact, map_location='cpu', weights_only=True)
             if state['domain'] != domain: raise ValueError('Action encoder domain mismatch')
             self.factor_head.load_state_dict(state['factor_head']); self.backend_id = state['backend_id']
 
@@ -56,8 +61,7 @@ class ActionVLM(nn.Module):
                              f'got {type(inputs).__name__}. Check the model processor and transformers version '
                              '(requirements.txt pins transformers==4.57.1).')
 
-    def parse_factors(self, answer):
-        return parse_action_factors(answer, self.domain)
+    def parse_factors(self, answer): return parse_action_factors(answer, self.domain, getattr(self, 'factor_schema', None))
 
     def forward(self, inputs, pooling_mask, factors=None):
         output = self.vlm(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
@@ -65,7 +69,7 @@ class ActionVLM(nn.Module):
         mask = pooling_mask.to(hidden.dtype).unsqueeze(-1)
         pooled = (hidden * mask).sum(1) / mask.sum(1).clamp_min(1)
         log_factors = F.softplus(self.factor_head(pooled.to(self.factor_head.weight.dtype)))
-        result = {'factors':log_factors.expm1()}
+        result = {'factors':log_factors.expm1(), 'latent':pooled}
         if factors is not None:
             valid = torch.isfinite(factors)
             if not valid.any() or (factors[valid] < 0).any(): raise ValueError('Nonnegative measured factor labels required')
@@ -75,12 +79,14 @@ class ActionVLM(nn.Module):
     def save(self, path, backend_id):
         path = Path(path); path.mkdir(parents=True, exist_ok=True)
         self.vlm.save_pretrained(path); self.processor.save_pretrained(path)
-        torch.save(dict(domain=self.domain, backend_id=backend_id, factor_head=self.factor_head.state_dict()), path/'action_factors.pt')
+        torch.save(dict(domain=self.domain, backend_id=backend_id, factor_schema=self.factor_schema, factor_head=self.factor_head.state_dict()), path/'action_factors.pt')
 
     @torch.inference_mode()
     def generate_factors(self, text, images=()):
-        fields = 'carbohydrate_g, protein_g, fat_g, fiber_g, mass_g, energy_kcal' if self.domain == 'diet' else 'duration_min, energy_kcal, intensity_MET'
-        count = 6 if self.domain == 'diet' else 3
+        schema = getattr(self, 'factor_schema', None)
+        if schema is None: schema = json.loads((Path(__file__).resolve().parents[2]/'extra_code/schema.json').read_text(encoding='utf-8'))['actions'][self.domain]
+        fields = ', '.join(s['name'] + ' (' + s['unit'] + ')' for s in schema)
+        count = len(schema)
         request = (text + '\nReturn ONLY one JSON object with key "factors" containing exactly '
                    + str(count) + ' numeric values in this order: ' + fields
                    + '. Use finite nonnegative numbers, not strings or null. Preserve supplied quantities; '

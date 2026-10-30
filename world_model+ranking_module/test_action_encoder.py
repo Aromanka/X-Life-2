@@ -14,10 +14,10 @@ from alignment import candidate, batch_candidates, FrozenRankingReference, prefe
 
 class ActionEncoderTests(unittest.TestCase):
     def response(self, role, payload):
-        size = 6 if payload['domain'] == 'diet' else 3
-        return {'result':{'factors':[2.]*size, 'backend_id':'sft', 'intensity_scale':'MET'}, 'provenance':{'test_backend':False}}
+        size = 5 if payload['domain'] == 'diet' else 4
+        return {'result':{'factors':[2.]*size, 'latent':[.1]*7, 'factor_schema':[dict(name=f'factor{i}',unit='test',scale=10.) for i in range(size)], 'backend_id':'sft'}, 'provenance':{'test_backend':False}}
 
-    def test_factor_bottleneck_and_images(self):
+    def test_joint_projection_and_images(self):
         encoder = HTTPActionEncoder('diet', 8, 'sft')
         with patch('backends.action_encoder.HTTPBackend.call', side_effect=self.response) as call:
             first = encoder(['meal'], [['meal.jpg']])
@@ -28,6 +28,34 @@ class ActionEncoderTests(unittest.TestCase):
         self.assertIsNotNone(encoder.projection[0].weight.grad)
         with patch('backends.action_encoder.HTTPBackend.call') as call:
             self.assertEqual(encoder(['']).abs().sum(), 0); call.assert_not_called()
+
+    def test_latent_contributes_and_schema_survives_reload(self):
+        encoder = HTTPActionEncoder('exercise', 8, 'sft')
+        response = self.response('', {'domain':'exercise'})
+        with patch('backends.action_encoder.HTTPBackend.call', return_value=response): first = encoder(['walking'])
+        self.assertEqual(encoder.projection[0].weight.shape, (8, 11))
+        restored = HTTPActionEncoder('exercise', 8, 'sft'); restored.load_state_dict(encoder.state_dict())
+        with patch('backends.action_encoder.HTTPBackend.call', return_value=response): torch.testing.assert_close(first, restored(['walking']))
+        response['result']['latent'] = [10.]*7
+        with patch('backends.action_encoder.HTTPBackend.call', return_value=response): self.assertFalse(torch.allclose(first, encoder(['walking'])))
+        response['result']['factor_schema'][0]['name'] = 'changed'
+        with patch('backends.action_encoder.HTTPBackend.call', return_value=response):
+            with self.assertRaisesRegex(ValueError, 'schema differs'): restored(['walking'])
+
+    def test_dynamic_factor_head_and_latent_mask(self):
+        class Backbone(nn.Module):
+            def forward(self, input_ids, **kwargs): return SimpleNamespace(hidden_states=[input_ids.float().unsqueeze(-1).repeat(1,1,4)], loss=torch.tensor(0.))
+        model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
+        model.domain = 'diet'; model.factor_schema = [dict(name=f'f{i}',unit='u',scale=1.) for i in range(9)]
+        model.vlm = Backbone(); model.factor_head = nn.Linear(4, 9)
+        output = model({'input_ids':torch.tensor([[1,3,999]])}, torch.tensor([[1,1,0]]))
+        torch.testing.assert_close(output['latent'], torch.full((1,4),2.))
+        self.assertEqual(output['factors'].shape,(1,9))
+        self.assertEqual(model.parse_factors(json.dumps({'factors':list(range(9))})),list(range(9)))
+        named = {f'f{i}':dict(value=i,unit='u') for i in range(9)}
+        self.assertEqual(model.parse_factors(json.dumps(named)), list(range(9)))
+        named['f0']['unit'] = 'wrong'
+        with self.assertRaises(ValueError): model.parse_factors(json.dumps(named))
 
     def test_pretrained_factor_generation(self):
         model = ActionVLM.__new__(ActionVLM); nn.Module.__init__(model)
@@ -42,12 +70,12 @@ class ActionEncoderTests(unittest.TestCase):
         with patch.object(model,'inputs',return_value=({'input_ids':torch.tensor([[1,2]])},None)):
             with self.assertRaises(ValueError): model.generate_factors('walking')
 
-    def test_reject_wrong_artifact_and_scale(self):
+    def test_reject_wrong_artifact_and_schema(self):
         encoder = HTTPActionEncoder('exercise', 8, 'other')
         with patch('backends.action_encoder.HTTPBackend.call', side_effect=self.response):
             with self.assertRaises(ValueError): encoder(['walking'])
         encoder.backend_id = 'sft'
-        bad = self.response('', {'domain':'exercise'}); bad['result']['intensity_scale'] = 'Borg6_20'
+        bad = self.response('', {'domain':'exercise'}); bad['result']['factor_schema'][0]['scale'] = 0
         with patch('backends.action_encoder.HTTPBackend.call', return_value=bad):
             with self.assertRaises(ValueError): encoder(['walking'])
 
@@ -164,6 +192,9 @@ class ActionEncoderTests(unittest.TestCase):
             loss, _ = preference_objective(model,pairs,reference,2.,'cpu'); loss.backward()
             self.assertIsNotNone(model.ranking_head.score[0].weight.grad)
             self.assertIsNone(model.diet_vlm.projection[0].weight.grad)
+            restored = MetabolicWorldModel(dimension=8,basis_dim=4,heads=2,layers=1,action_backend_id='sft')
+            restored.load_checkpoint(dict(ranking_version=2, model_state_dict=model.state_dict()))
+            torch.testing.assert_close(model.simulate(batch,'diet')['predicted_cgm'],restored.simulate(batch,'diet')['predicted_cgm'])
 
 
 if __name__ == '__main__': unittest.main()
