@@ -58,6 +58,7 @@ class Transition(nn.Module):
     def increment(self, state): return self.dynamics(state @ self.basis.T)
 
     def readout(self, states):
+        """Read Q_n from S_0..S_n with no access to S_(n+1)."""
         q = self.trajectory(states, mask=causal_mask(states.size(1), states.device))
         return q, self.decoder(q).squeeze(-1)
 
@@ -220,6 +221,9 @@ class MetabolicWorldModel(nn.Module):
         state = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
         states, gates = [], []
         for _ in range(horizon):
+            # Both branches consume S_n: readout produces Q_n, while the
+            # residual dynamics below advance the rollout to S_(n+1).
+            states.append(state)
             if mode == 'joint':
                 d, e = state.split(self.dimension, -1)
                 weights = torch.sigmoid(self.gate(state @ self.fusion.basis.T))
@@ -227,7 +231,6 @@ class MetabolicWorldModel(nn.Module):
                 state = state + torch.cat([weights[:, :1]*dm, weights[:, 1:2]*em], -1) + weights[:, 2:3]*self.fusion.increment(state)
                 gates.append(weights)
             else: state = state + getattr(self, mode).increment(state)
-            states.append(state)
         states = torch.stack(states, 1)
         q, glucose = (self.fusion if mode == 'joint' else getattr(self, mode)).readout(states)
         if self.readout == 'autoregressive': glucose = self.ar_decoders[mode](None, q).squeeze(-1)
