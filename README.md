@@ -236,6 +236,8 @@ python 'world_model+ranking_module/train.py' --config example_config.json \
 
 **4. Multi-stage Alignment**
 
+Recommendation requirements use explicit `--requirement` JSON first, then the optional `inference.requirement` object. When absent or null, the client calls `POST /v1/requirement/default` with mode, context and constraints. The role service returns `{"requirement": {...}}` from `server.default_requirements[mode]` in the standard result/provenance envelope. The example service defaults are 500 kcal for diet, 20 minutes for exercise, and both for joint actions; configure these values for your deployment. Requirements are never randomly generated. HTTP failures produce `method_status=requirement_failed` with no recommendations.
+
 Train fusion after both single domains, then align the ranking head through professional and physiological preferences. User feedback has a separate entry point:
 
 ```bash

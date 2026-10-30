@@ -76,10 +76,7 @@ def recommend(context, model, checkpoint, backend, graph, mode=None, count=None,
     if count<1 or top_k<1 or batch_size<1: raise ValueError('Positive counts required')
     constraints = constraints or {}
     if requirement is None:
-        specification = settings('inference', 'requirement')
-        requirement=dict(mode=mode,preference_seed=seed,onset=specification['joint_onset'] if mode=='joint' else specification['single_onset'])
-        if mode in ('diet','joint'): requirement['energy_kcal']=random.Random(seed).randint(*specification['energy_kcal_range'])
-        if mode in ('exercise','joint'): requirement['duration_min']=random.Random(seed+1).randint(*specification['duration_min_range'])
+        requirement = settings('inference').get('requirement')
     context = deepcopy(context)
     identity = hashlib.sha256(json.dumps(context,sort_keys=True,allow_nan=False).encode()).hexdigest()
     output = dict(schema_version=2, context=context, context_hash=identity, requirement=requirement,
@@ -88,6 +85,21 @@ def recommend(context, model, checkpoint, backend, graph, mode=None, count=None,
         method_status='pending')
     output['test_only'] |= any(p.get('test_backend',False) for p in graph.provenance)
     output['test_only'] |= bool(checkpoint.get('test_backend',False))
+    try:
+        if requirement is None:
+            response = backend.call('requirement/default', dict(mode=mode, context=context, constraints=constraints))
+            requirement = response['result']['requirement']
+            output['requirement_provenance'] = response['provenance']
+            output['test_only'] |= response['provenance']['test_backend']
+        if not isinstance(requirement, dict):
+            raise ValueError('Requirement must be a JSON object')
+        json.dumps(requirement, allow_nan=False)
+        requirement = deepcopy(requirement)
+        output['requirement'] = requirement
+    except Exception as error:
+        output['method_status'] = 'requirement_failed'
+        output['failures'].append(dict(stage='requirement', reason=str(error)))
+        return output
     sources = dict(context=context, requirement=requirement, constraints=constraints)
     try:
         schema = load_schema(backend)
