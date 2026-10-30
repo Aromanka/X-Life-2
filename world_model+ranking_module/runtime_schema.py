@@ -35,33 +35,6 @@ def load_schema(backend=None):
     return schema
 
 
-def supervision_values(schema, sources):
-    result = {}
-    for spec in schema['supervision']:
-        value = read_path(sources, spec['path'])
-        mask = read_path(sources, spec['mask']) if spec.get('mask') else None
-        test_backend = False
-        if value is not None and spec.get('encode'):
-            encoder = spec['encode']
-            response = HTTPBackend().call(encoder['role'], {encoder['input']:value})
-            value, test_backend = response['result'][encoder['output']], response['provenance']['test_backend']
-        if value is None: target = torch.full(spec['shape'], float('nan'))
-        else:
-            def numbers(v):
-                if isinstance(v, (list, tuple)): return [numbers(x) for x in v]
-                return float('nan') if v is None else v
-            target = torch.as_tensor(numbers(value), dtype=torch.float32)
-        if list(target.shape) != spec['shape']: raise ValueError('Supervision shape differs from schema: '+spec['name'])
-        valid = torch.isfinite(target)
-        if mask is not None:
-            mask = torch.as_tensor(mask)
-            if not ((mask == 0) | (mask == 1)).all(): raise ValueError('Invalid observation mask')
-            while mask.ndim < target.ndim: mask = mask.unsqueeze(-1)
-            valid &= torch.broadcast_to(mask.bool(), target.shape)
-        result[spec['name']] = {'target':torch.nan_to_num(target), 'mask':valid, 'test_backend':test_backend}
-    return result
-
-
 def supervision_loss(model, rows, output, mode):
     losses = []
     for spec in model.schema['supervision']:

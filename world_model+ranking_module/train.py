@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import torch
 from torch.utils.data import DataLoader
-from dataset import XLifeCleanedDataset, SampleNumericDataset
+from dataset import XLifeCleanedDataset, SampleNumericDataset, split_samples, temporal_overlap
 from world_model import MetabolicWorldModel, llm_actions_enabled
 from runtime_schema import load_schema, supervision_loss
 from configuration import settings, parse_configured, optimizer_settings
@@ -27,34 +27,6 @@ def device_batch(batch, device): return {key: value.to(device) if isinstance(val
 def physiological_loss(model, batch, mode):
     output = model(batch, mode, horizon=batch['target'].size(1))
     return supervision_loss(model, batch['supervision'], output, mode)
-
-
-def split_samples(samples, strategy, seed, splits=None):
-    if strategy == 'subject':
-        if splits is None:
-            ids = sorted({s['subject_id'] for s in samples}); random.Random(seed).shuffle(ids)
-            n = max(1, int(len(ids)*settings('data', 'train_fraction'))); v = max(1, int(len(ids)*settings('data', 'validation_fraction'))) if len(ids) >= 3 else 0
-            splits = dict(train=ids[:n], validation=ids[n:n+v], test=ids[n+v:])
-        return {k:[s for s in samples if s['subject_id'] in subjects] for k,subjects in splits.items()}, splits
-    def key(s): return f"{s['subject_id']}|{s['origin']}|{s['mode']}"
-    if splits is None:
-        splits = dict(train=[], validation=[], test=[])
-        for subject in sorted({s['subject_id'] for s in samples}):
-            rows = sorted([s for s in samples if s['subject_id']==subject], key=lambda s:s['origin'])
-            cutoff = rows[min(len(rows)-1, max(1, int(len(rows)*settings('data', 'within_subject_train_fraction'))))]['origin'] if len(rows)>1 else None
-            for row in rows: splits['train' if cutoff is None or row['origin']<cutoff else 'validation'].append(key(row))
-    available = {key(s) for s in samples}
-    if any(set(values)-available for values in splits.values()): raise ValueError('Temporal split records missing from selected data')
-    assignments = {k:set(values) for k,values in splits.items()}
-    return {k:[s for s in samples if key(s) in values] for k,values in assignments.items()}, splits
-
-
-def temporal_overlap(groups):
-    count = 0
-    for row in groups['validation']:
-        earlier = [s for s in groups['train'] if s['subject_id']==row['subject_id']]
-        if earlier and datetime.fromisoformat(row['origin'])-timedelta(minutes=settings('data', 'history_steps')*settings('data', 'interval_minutes')) < max(datetime.fromisoformat(s['origin']) for s in earlier)+timedelta(minutes=settings('data', 'horizon_steps')*settings('data', 'interval_minutes')): count += 1
-    return count
 
 
 def curve_metrics(rows):
