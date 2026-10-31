@@ -45,9 +45,7 @@ This repository contains the Python code and minimum dataset for **"A metabolic 
 
 - **Python**: 3.10+
 - **PyTorch**: >=2.7,<3
-- **JDK** (for Neo4j): 17.0.18+
 - **Unity3D**: 2022.3.x
-- **Neo4j** (optional): 5.26.21+
 
 #### Hardware Requirements
 
@@ -78,27 +76,6 @@ Install the Python dependencies for the world model, ranking module and agents:
 ```bash
 pip install -r requirements.txt
 ```
-
-#### 4. Install Neo4j Service (Optional)
-
-<details>
-<summary>🔧 JDK and Neo4j setup commands</summary>
-
-```bash
-# Install JDK
-sudo apt install openjdk-17-jdk
-# Verify JDK version
-java -version
-```
-
-Download the Neo4j Community 5.26.21 tarball from the [Neo4j Deployment Center](https://neo4j.com/deployment-center/?gdb-selfmanaged) and start the service:
-```bash
-tar zxf neo4j-community-5.26.21-unix.tar.gz
-cd neo4j-community-5.26.21/bin/
-./neo4j start
-```
-
-</details>
 
 <a name="core-modules"></a>
 

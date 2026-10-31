@@ -45,12 +45,13 @@ class NumericEncoder(nn.Module):
 
 
 class Transition(nn.Module):
-    def __init__(self, dimension, basis_dim, heads, layers, architecture):
+    def __init__(self, dimension, basis_dim, heads, layers, architecture, basis_readout=True):
         super().__init__()
         self.conditioning = nn.Sequential(nn.Linear(2*dimension, dimension), nn.GELU(), nn.Linear(dimension, dimension))
         self.basis = nn.Parameter(torch.empty(basis_dim, dimension))
         nn.init.orthogonal_(self.basis)
         self.dynamics = nn.Sequential(nn.Linear(basis_dim, dimension), nn.LayerNorm(dimension), nn.GELU(), nn.Linear(dimension, dimension))
+        self.trajectory_projection = nn.Linear(basis_dim, dimension) if basis_readout else None
         self.trajectory = transformer_encoder(dimension, heads, layers, architecture['dropout'],
             dimension*architecture['feedforward_multiplier'], architecture['activation'])
         self.decoder = nn.Linear(dimension, 1)
@@ -58,7 +59,8 @@ class Transition(nn.Module):
     def increment(self, state): return self.dynamics(state @ self.basis.T)
 
     def readout(self, states):
-        """Read Q_n from S_0..S_n with no access to S_(n+1)."""
+        if self.trajectory_projection is not None:
+            states = self.trajectory_projection(states @ self.basis.T)
         q = self.trajectory(states, mask=causal_mask(states.size(1), states.device))
         return q, self.decoder(q).squeeze(-1)
 
@@ -105,7 +107,7 @@ class MetabolicWorldModel(nn.Module):
         self.state_projection = nn.Sequential(nn.Linear(3*dimension+2, dimension), nn.GELU(), nn.Linear(dimension, dimension))
         self.diet = Transition(dimension, basis_dim, heads, layers, self.model_settings)
         self.exercise = Transition(dimension, basis_dim, heads, layers, self.model_settings)
-        self.fusion = Transition(2*dimension, 2*basis_dim, heads, layers, self.model_settings)
+        self.fusion = Transition(2*dimension, 2*basis_dim, heads, layers, self.model_settings, basis_readout=False)
         self.gate = nn.Linear(2*basis_dim, 3)
         self.register_buffer('glucose_mean', torch.tensor(0.))
         self.register_buffer('glucose_scale', torch.tensor(1.))
@@ -221,16 +223,16 @@ class MetabolicWorldModel(nn.Module):
         state = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
         states, gates = [], []
         for _ in range(horizon):
-            # Both branches consume S_n: readout produces Q_n, while the
-            # residual dynamics below advance the rollout to S_(n+1).
-            states.append(state)
             if mode == 'joint':
                 d, e = state.split(self.dimension, -1)
                 weights = torch.sigmoid(self.gate(state @ self.fusion.basis.T))
                 dm, em = self.diet.increment(d), self.exercise.increment(e)
                 state = state + torch.cat([weights[:, :1]*dm, weights[:, 1:2]*em], -1) + weights[:, 2:3]*self.fusion.increment(state)
                 gates.append(weights)
-            else: state = state + getattr(self, mode).increment(state)
+                states.append(state)
+            else:
+                states.append(state)
+                state = state + getattr(self, mode).increment(state)
         states = torch.stack(states, 1)
         q, glucose = (self.fusion if mode == 'joint' else getattr(self, mode)).readout(states)
         if self.readout == 'autoregressive': glucose = self.ar_decoders[mode](None, q).squeeze(-1)
