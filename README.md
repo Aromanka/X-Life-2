@@ -6,9 +6,9 @@
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10"></a>
-  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.7-EE4C2C?logo=pytorch&amp;logoColor=white" alt="PyTorch 2.7"></a>
-  <a href="https://unity.com/"><img src="https://img.shields.io/badge/Unity-2022.3.x-000000?logo=unity&amp;logoColor=white" alt="Unity 2022.3"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11.13-3776AB?logo=python&amp;logoColor=white" alt="Python 3.11.13"></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.8.0-EE4C2C?logo=pytorch&amp;logoColor=white" alt="PyTorch 2.8.0"></a>
+  <a href="https://unity.com/"><img src="https://img.shields.io/badge/Unity-2022.3.x-000000?logo=unity&logoColor=white" alt="Unity 2022.3.x"></a>
   <a href="./CITATION.cff"><img src="https://img.shields.io/badge/Citation-CITATION.cff-lightgrey" alt="Citation"></a>
 </p>
 
@@ -39,19 +39,6 @@ This repository contains the Python code and minimum dataset for **"A metabolic 
 
 ## 🚀 Quick Start
 
-### System Requirements
-
-#### Software Dependencies
-
-- **Python**: 3.10+
-- **PyTorch**: >=2.7,<3
-- **Unity3D**: 2022.3.x
-
-#### Hardware Requirements
-
-- **Training**: NVIDIA A800 or equivalent GPU
-- **AR Deployment**: Android 14+ compatible device
-
 ### Installation
 
 #### 1. Clone the Repository
@@ -65,7 +52,7 @@ cd X-Life
 
 ```bash
 # Using conda (recommended)
-conda create -n xlife python=3.10 -y
+conda create -n xlife python=3.11.13 -y
 conda activate xlife
 ```
 
@@ -74,7 +61,9 @@ conda activate xlife
 Install the Python dependencies for the world model, ranking module and agents:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install uv==0.8.15
+uv pip install --python python -r requirements.txt
+python -m pip check
 ```
 
 <a name="core-modules"></a>
@@ -150,29 +139,29 @@ Optional `--replay-data` accepts one JSON or JSONL file containing replay pairs,
 
 **5. Inference**
 
-Exercise:
+Exercise only:
 
 ```bash
 python 'world_model+ranking_module/inference.py' --config config.json \
-  --data data/train.json --checkpoint outputs/user/checkpoint.pt \
+  --data data/train.json --checkpoint outputs/${ALIGNMENT_PHASE}/checkpoint.pt \
   --knowledge data/knowledge.json --mode exercise --ranking learned \
   --top-k 3 --output outputs/exercise_recommendations.json
 ```
 
-Diet:
+Diet only:
 
 ```bash
 python 'world_model+ranking_module/inference.py' --config config.json \
-  --data data/train.json --checkpoint outputs/user/checkpoint.pt \
+  --data data/train.json --checkpoint outputs/${ALIGNMENT_PHASE}/checkpoint.pt \
   --knowledge data/knowledge.json --mode diet --ranking learned \
   --top-k 3 --output outputs/diet_recommendations.json
 ```
 
-Fusion (combined diet and exercise, using `--mode joint`):
+Combined diet and exercise:
 
 ```bash
 python 'world_model+ranking_module/inference.py' --config config.json \
-  --data data/train.json --checkpoint outputs/user/checkpoint.pt \
+  --data data/train.json --checkpoint outputs/${ALIGNMENT_PHASE}/checkpoint.pt \
   --knowledge data/knowledge.json --mode joint --ranking learned \
   --top-k 3 --output outputs/fusion_recommendations.json
 ```

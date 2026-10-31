@@ -60,7 +60,7 @@ class ActionVLM(nn.Module):
         if not isinstance(inputs, Mapping) or not {'input_ids', 'attention_mask'} <= inputs.keys():
             raise ValueError('Qwen processor must return input_ids and attention_mask in a mapping; '
                              f'got {type(inputs).__name__}. Check the model processor and transformers version '
-                             '(requirements.txt pins transformers==4.57.1).')
+                             '(requirements.txt pins transformers==4.57.6).')
 
     def parse_factors(self, answer): return parse_action_factors(answer, self.domain, getattr(self, 'factor_schema', None))
 
