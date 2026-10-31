@@ -101,12 +101,12 @@ Pre-train the diet and exercise encoders separately using the Qwen2.5-VL-72B-Ins
 python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
   --model Qwen/Qwen2.5-VL-72B-Instruct --domain diet \
   --data data/diet_annotations.json --output outputs/diet_encoder \
-  --backend-id diet-sft-v1
+  --backend-id diet-sft
 
 python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
   --model Qwen/Qwen2.5-VL-72B-Instruct --domain exercise \
   --data data/exercise_annotations.json --output outputs/exercise_encoder \
-  --backend-id exercise-sft-v1
+  --backend-id exercise-sft
 ```
 
 Configure the role service to use these saved encoders, and set `model.action_backend_id.diet` and `model.action_backend_id.exercise` to the matching backend IDs in `config.json`. Enable `http.use_llm_action_encoders` for these encoders.
