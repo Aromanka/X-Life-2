@@ -183,6 +183,10 @@ Set `--mode exercise` or `--mode joint` for exercise or combined prescriptions. 
 
 Configure the locally deployed DeepSeek-R1 model for the `safety` role in `config.json`. Safety review is included in the prescription inference pipeline.
 
+The role server normalizes clinical context and candidate actions into safety input schema v1: `schema_version`, `as_of`, `mode` and `facts`. Each fact contains `name`, `value`, `unit`, `source` and optional `observed_at`. Rules and semantic review use these same facts; accepted responses return them under `inputs`.
+
+Configure `safety.field_map` for source-specific metadata names and categories, `safety.glucose_unit` for historical CGM, and `safety.high_intensity_thresholds` for each supported intensity scale. `safety.required_facts` and `safety.max_glucose_age_minutes` control required inputs and glucose freshness. Missing inputs needed by an applicable rule reject that check. Dataset adapters and field mapping run in the external role server, not the world model.
+
 <a name="ar-deployment"></a>
 
 ## 🥽 AR Deployment

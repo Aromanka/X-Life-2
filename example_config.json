@@ -1,4 +1,11 @@
 {
+  "safety": {
+    "field_map": {},
+    "high_intensity_thresholds": {},
+    "required_facts": [],
+    "glucose_unit": null,
+    "max_glucose_age_minutes": null
+  },
   "model": {
     "dimension": null,
     "basis_dim": null,

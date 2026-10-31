@@ -98,10 +98,13 @@ def main(argv=None):
     training = config['training']
     checkpoint_path = args.resume or args.init_checkpoint
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False) if checkpoint_path else None
+    restore_split = bool(checkpoint and (args.resume or args.predict_only))
     if checkpoint:
         if checkpoint.get('architecture_version') != 3: raise ValueError('Expected architecture_version 3')
         if checkpoint['llm_actions'] != llm_actions_enabled(): raise ValueError('Checkpoint action backend differs from environment')
         model_config.update(checkpoint['model_config'])
+        if not restore_split:
+            model_config['data_config'] = dict(model_config['data_config'], **{key:config['data'][key] for key in ('train_fraction', 'validation_fraction', 'within_subject_train_fraction')})
         if model_config['data_config'] != config['data']:
             raise ValueError('Checkpoint data configuration differs from configuration file')
     if args.rank_only or (args.phase in {'professional', 'physiological'} and not args.predict_only):
@@ -121,10 +124,10 @@ def main(argv=None):
     model_config = dict(model_config, schema=schema)
     dataset = {'xlife_cleaned': XLifeCleanedDataset, 'sample': SampleNumericDataset}[args.dataset](args.data, args.max_subjects, args.max_samples, schema=schema)
     if not dataset.samples: raise ValueError('No usable records')
-    strategy = args.split_strategy or (checkpoint['split_strategy'] if checkpoint else training['split_strategy'])
-    if checkpoint and strategy != checkpoint['split_strategy']: raise ValueError('Checkpoint split strategy mismatch; start a new experiment')
-    groups,splits = split_samples(dataset.samples,strategy,args.seed,checkpoint['splits'] if checkpoint else None)
-    if not groups['train']: raise ValueError('No training subjects from checkpoint in selected data')
+    strategy = args.split_strategy or (checkpoint['split_strategy'] if restore_split else training['split_strategy'])
+    if restore_split and strategy != checkpoint['split_strategy']: raise ValueError('Checkpoint split strategy mismatch; start a new experiment')
+    groups,splits = split_samples(dataset.samples,strategy,args.seed,checkpoint['splits'] if restore_split else None)
+    if not groups['train']: raise ValueError('No training samples in selected data')
     vocabulary = checkpoint['vocabulary'] if checkpoint else {v:i+1 for i,v in enumerate(sorted({s['exercise_type'] for s in groups['train'] if s['exercise_type']}))}
     if len(vocabulary) >= model_config['type_capacity']: raise ValueError('Too many exercise categories')
     model = MetabolicWorldModel(**model_config)
