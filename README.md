@@ -24,9 +24,8 @@
   - [Lifestyle Prescription Generation Module](#lifestyle-prescription-generation-module)
   - [Diet/Exercise Sub-world model and Ranking Module](#dietexercise-sub-world-model-and-ranking-module)
   - [Safety Module](#safety-module)
-  - [Multi-omics Model](#multi-omics-model)
 - [🥽 AR Deployment](#ar-deployment)
-- [📊 Minimum Dataset](#minimum-dataset)
+- [📊 minimum Dataset](#minimum-dataset)
 - [📄 License](#license)
 
 <a name="overview"></a>
@@ -40,21 +39,15 @@ This repository contains the Python code and minimum dataset for **"A metabolic 
 
 ## 🚀 Quick Start
 
-### Maintained experiment configuration
-
-Current v3 experiments use `config.json` by default. `example_config.json` is an abstract schema: all leaf values are JSON `null` and must be populated before use. Do not copy it over the experiment configuration. Use `--config` or `XLIFE_CONFIG` to select another complete file.
-
-Start the role service from the parent workspace with `python extra_code/server.py --config X-Life-2/config.json`. See [role service configuration](../extra_code/README.md) for API/local selection and model contracts. The older commands below describe the historical pipeline; for the maintained trainer run `python 'world_model+ranking_module/train.py' --help`.
-
 ### System Requirements
 
 #### Software Dependencies
 
 - **Python**: 3.10+
-- **PyTorch**: 2.7.0
-- **JDK**: 17.0.18+
+- **PyTorch**: >=2.7,<3
+- **JDK** (for Neo4j): 17.0.18+
 - **Unity3D**: 2022.3.x
-- **Neo4j**: 5.26.21+
+- **Neo4j** (optional): 5.26.21+
 
 #### Hardware Requirements
 
@@ -86,7 +79,7 @@ Install the Python dependencies for the world model, ranking module and agents:
 pip install -r requirements.txt
 ```
 
-#### 4. Install Neo4j Service
+#### 4. Install Neo4j Service (Optional)
 
 <details>
 <summary>🔧 JDK and Neo4j setup commands</summary>
@@ -115,184 +108,103 @@ cd neo4j-community-5.26.21/bin/
 
 This module generates diet and exercise prescriptions from a hybrid graph and vector knowledge base.
 
-#### Configuration Steps
+Run all commands below from the repository root. Configure model paths, role endpoints and training parameters in `config.json`, and set `http.url` to the running role service.
 
-**1. Configure Database and Models**
+| Role | Model |
+| --- | --- |
+| Prescription generation and knowledge extraction | Qwen3-32B |
+| Clinical and physiological metadata encoding | Qwen3-32B |
+| Knowledge embeddings | Qwen3-Embedding-8B |
+| Diet and exercise action encoders | Fine-tuned Qwen2.5-VL-72B-Instruct |
+| Safety review | Locally deployed DeepSeek-R1 |
 
-Copy the agent configuration template:
+#### Knowledge Graph Construction
 
-```bash
-cp kg_agents/config.example.json kg_agents/config.json
-```
-
-Configure the Neo4j database, local DeepSeek-R1 service and model paths in `./kg_agents/config.json`:
-
-<details>
-<summary>⚙️ Example agent configuration</summary>
-
-```json
-{
-    "neo4j": {
-        "uri": "bolt://127.0.0.1:7687",
-        "username": "your_username",
-        "password": "your_password"
-    },
-    "api_model": {
-        "api_key": "local",
-        "base_url": "http://localhost:8000/v1",
-        "model": "DeepSeek-R1"
-    },
-    "local_model_path": "",
-    "local_emb_path": "your_local_embedding_model_path",
-    "world_model": {
-        "checkpoint_path": "outputs/user/inference.pt",
-        "config_path": "configs/local.json",
-        "device": "auto"
-    }
-}
-```
-
-</details>
-
-**2. Prepare Guidelines**
-
-Prepare guidelines following the descriptions in our paper:
-
-```
-kg_agents/
-└── data/
-    ├── diet/
-    │   ├── diet_guideline_1.pdf
-    │   └── ...
-    └── exer/
-        ├── exercise_guideline_1.pdf
-        └── ...
-```
-
-**3. Extract and Embed Entities**
-
-Make sure the Neo4j server has started:
+Prepare guideline PDFs or text files and extract the knowledge graph:
 
 ```bash
-cd kg_agents
-# Extract knowledge from ./data
-python -m core.build_kg_2_steps
-# Import knowledge graph
-python -m core.import_kg
-# (Optional) Embedding knowledge graph
-python -m core.embed_kg
+python 'world_model+ranking_module/knowledge_cli.py' --config config.json \
+  --input data/guidelines.pdf --output data/knowledge.json
 ```
-
-#### Run Pipelines
-
-**Generation and Assessment Pipelines**
-
-```bash
-# Run these commands from the repository root.
-cd kg_agents
-# Run diet prescription pipeline
-python -m pipeline.diet_pipeline --bn 1 --vn 5 --query "I want a sandwich with just veggies, no meat." --use_vector --rag_topk 5
-# Run exercise prescription pipeline
-python -m pipeline.exer_pipeline --bn 1 --vn 4 --query "I want to do some back exercises at the gym." --use_vector --rag_topk 5
-```
-
-**Start Flask Service**
-
-Set `world_model.checkpoint_path` to the trained ranking checkpoint. For `/diet/generate` and `/exercise/generate`, include the current event as `world_model_context` with `subject_id`, `metadata`, `sleep_data` and `cgm_pre`.
-
-```bash
-cd kg_agents
-python server.py
-```
-
-<details>
-<summary>🔌 API request examples</summary>
-
-```bash
-# Diet prescription generation
-curl -X POST http://localhost:5000/api/v1/diet/generate-only \
-  -H "Content-Type: application/json" \
-  -d '{"user_metadata":{},"user_requirement":{},"user_query":"a balanced lunch"}'
-
-# Exercise prescription generation
-curl -X POST http://localhost:5000/api/v1/exercise/generate-only \
-  -H "Content-Type: application/json" \
-  -d '{"user_metadata":{},"user_requirement":{},"user_query":"a moderate walk"}'
-
-# Safety module assess prescription
-curl -X POST http://localhost:5000/api/v1/safety/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "plan_type": "diet",
-    "user_metadata": {},
-    "plan": {}
-  }'
-```
-
-</details>
-
-Prompt examples for generation, assessment and knowledge-graph extraction are in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
 
 ### Diet/Exercise Sub-world model and Ranking Module
 
-Diet/Exercise sub-world models simulate future glucose state and Ranking module ranks candidate diet and exercise prescriptions.
+The sub-world models simulate glucose trajectories; the ranking module scores candidate prescriptions.
 
 **1. Data Preparation**
 
-Prepare participant metadata, meal images and descriptions, exercise records and CGM trajectories using [minimum_dataset/sample_data.json](./minimum_dataset/sample_data.json). Add training annotations and preference pairs when running encoder pre-training or alignment.
+Prepare participant metadata, meals, exercise records and CGM trajectories using [minimum_dataset/sample_data.json](./minimum_dataset/sample_data.json). The training and preference files below are user-prepared inputs.
 
-**2. Model Configuration**
+Action-encoder training files contain `text`, optional `images`, `annotations` and `factors`, ordered according to `schema.actions` in `config.json`.
 
-Copy the configuration template and set the local Qwen3-8B and Qwen2.5-VL-72B-Instruct paths, image directory and training parameters:
+**2. Action Encoder Pre-training**
+
+Pre-train the diet and exercise encoders separately using a local Qwen2.5-VL-72B-Instruct backbone:
 
 ```bash
-cp configs/local.example.json configs/local.json
+python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
+  --model /path/to/local/Qwen2.5-VL-72B-Instruct --domain diet \
+  --data data/diet_annotations.json --output outputs/diet_encoder \
+  --backend-id diet-sft-v1
+
+python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
+  --model /path/to/local/Qwen2.5-VL-72B-Instruct --domain exercise \
+  --data data/exercise_annotations.json --output outputs/exercise_encoder \
+  --backend-id exercise-sft-v1
 ```
 
-> **Note.** The diet action encoder uses a Qwen2.5-VL-72B-Instruct backbone fine-tuned on structured dietary information, including nutrition analysis, ingredients and preparation methods.
+Configure the role service to use these saved encoders, and set `model.action_backend_id.diet` and `model.action_backend_id.exercise` to the matching backend IDs in `config.json`. Enable `http.use_llm_action_encoders` for these encoders.
 
-**3. Training**
+**3. World Model Training**
 
-Run these commands from the repository root:
+Train both sub-world models, then train their fusion module:
 
 ```bash
-# Encode structured training annotations with local Qwen3
-python 'world_model+ranking_module/encode_annotations.py' \
-  --input data/annotations.json --output data/train.json \
-  --model-path /path/to/local/Qwen3-8B --image-dir data/images --device cuda
+python 'world_model+ranking_module/train.py' --config config.json \
+  --phase single --domain both --data data/train.json --output outputs/single
 
-# Pre-train the action encoders
-python 'world_model+ranking_module/train.py' --config configs/local.json \
-  --phase encoder_pretraining --data data/train.json --output outputs/encoders
-
-# Train the world model
-python 'world_model+ranking_module/train.py' --config configs/local.json \
-  --phase world_model --data data/train.json \
-  --init-checkpoint outputs/encoders/checkpoint.pt --output outputs/world
+python 'world_model+ranking_module/train.py' --config config.json \
+  --phase fusion --data data/train.json \
+  --init-checkpoint outputs/single/checkpoint.pt --output outputs/fusion
 ```
 
 **4. Multi-stage Alignment**
 
-Preference alignment proceeds through `professional`, `physiological` and `user` stages:
+Run health professional alignment, physiological response alignment and user feedback alignment in order:
 
 ```bash
-python 'world_model+ranking_module/train.py' --config configs/local.json \
-  --phase preference_alignment --stage professional --data data/train.json \
-  --pairs data/professional_pairs.json --init-checkpoint outputs/world/checkpoint.pt \
-  --output outputs/professional
+python 'world_model+ranking_module/train.py' --config config.json \
+  --phase professional --data data/professional_pairs.json \
+  --init-checkpoint outputs/fusion/checkpoint.pt --output outputs/professional
+
+python 'world_model+ranking_module/train.py' --config config.json \
+  --phase physiological --data data/physiological_pairs.json \
+  --replay-data data/professional_pairs.json \
+  --init-checkpoint outputs/professional/checkpoint.pt --output outputs/physiological
+
+python 'world_model+ranking_module/train_user_feedback.py' --config config.json \
+  --data data/user_feedback.json --observation-data data/user_observations.json \
+  --expert-replay-data data/professional_pairs.json \
+  --physiological-replay-data data/physiological_pairs.json \
+  --init-checkpoint outputs/physiological/checkpoint.pt --output outputs/user
 ```
 
-For physiological and user alignment, select the corresponding `--stage`, set `--participant-id`, initialize from the previous stage and pass earlier preference files through `--replay`. Use `--phase participant_update` for later updates and `--export-inference` to save inference weights.
+For physiological alignment, set `alignment.replay_fraction` between 0.2 and 0.3 and provide enough current pairs to realise that ratio. Each user feedback run uses feedback and measured observations from one participant.
 
-Run `python 'world_model+ranking_module/train.py' --help` for available options.
+**5. Prescription Generation and Ranking**
+
+```bash
+python 'world_model+ranking_module/inference.py' --config config.json \
+  --data data/train.json --checkpoint outputs/user/checkpoint.pt \
+  --knowledge data/knowledge.json --mode diet --ranking learned \
+  --top-k 3 --output outputs/diet_recommendations.json
+```
+
+Set `--mode exercise` or `--mode joint` for exercise or combined prescriptions. Use each script's `--help` for available arguments.
 
 ### Safety Module
 
-The safety module uses retrieval-augmented generation and explicit safety constraints. Configure the local DeepSeek-R1 service in `kg_agents/config.json`. Prompts are in [kg_agents/sample_prompts.md](./kg_agents/sample_prompts.md).
-
-### Multi-omics Model
-
-Structured omics annotations provide auxiliary targets during world-model training. The omics prediction head is removed at inference.
+Configure the locally deployed DeepSeek-R1 model for the `safety` role in `config.json`. Safety review is included in the prescription inference pipeline.
 
 <a name="ar-deployment"></a>
 
@@ -401,7 +313,7 @@ Alternatively, create a ScriptableObject config in Unity:
 
 <a name="minimum-dataset"></a>
 
-## 📊 Minimum Dataset
+## 📊 minimum Dataset
 
 The minimum dataset is available at [`./minimum_dataset/`](./minimum_dataset/). It contains three pseudonymous participants with:
 
