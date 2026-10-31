@@ -1,4 +1,0 @@
-{
-  "model": {"dimension": 128, "basis_dim": 128, "heads": 4, "layers": 2, "patch_size": 6},
-  "training": {"learning_rate": 0.0001}
-}
