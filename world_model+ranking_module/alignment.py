@@ -54,15 +54,16 @@ class NumericPreferencePairs(Dataset):
             for key in (row['state_id'], (row['context']['subject_id'], row['context']['origin'])):
                 if key in contexts and contexts[key] != identity: raise ValueError('A state must have one immutable context and split')
                 contexts[key] = identity
-            if row.get('source_stage', stage) != stage: raise ValueError('Pair source stage mismatch')
-            if stage == 'physiological':
+            source_stage = row.get('source_stage', stage or 'professional')
+            if stage is not None and source_stage != stage: raise ValueError('Pair source stage mismatch')
+            if source_stage == 'physiological':
                 evidence = row.get('evidence', {})
                 if not all(isinstance(evidence.get(k), str) and evidence[k].strip() for k in ('source', 'preferred_observation_id', 'rejected_observation_id')): raise ValueError('Physiological pairs require source and two factual observation IDs')
                 if evidence['preferred_observation_id'] == evidence['rejected_observation_id']: raise ValueError('Two alternatives cannot share one factual observation')
             weight = float(row['pair_weight'] if 'pair_weight' in row else settings('alignment', 'pair_weight'))
             if not math.isfinite(weight) or weight <= 0: raise ValueError('Pair weight must be finite and positive')
             pair = {side:candidate(row['context'], row[side], vocabulary) for side in ('preferred', 'rejected')}
-            pair.update(preferred_mode=row['preferred']['mode'], rejected_mode=row['rejected']['mode'], pair_weight=weight, source_stage=stage)
+            pair.update(preferred_mode=row['preferred']['mode'], rejected_mode=row['rejected']['mode'], pair_weight=weight, source_stage=source_stage)
             if row['split'] == split: self.rows.append(pair)
 
     def __len__(self): return len(self.rows)
@@ -112,24 +113,20 @@ def run_alignment(args, model, checkpoint, config, output):
     alignment_settings = config['alignment']
     beta, fraction = float(alignment_settings['beta']), float(alignment_settings['replay_fraction'])
     if not math.isfinite(beta) or beta <= 0: raise ValueError('DPO beta must be finite and positive')
-    if args.phase == 'physiological' and not .2 <= fraction <= .3: raise ValueError('Physiological replay must be 20–30 percent')
     expected = 'professional' if args.phase == 'physiological' else 'fusion'
     if checkpoint['phase'] != (args.phase if args.resume else expected): raise ValueError(f'{args.phase} requires {expected} initialization or same-phase resume')
     records = read_records(args.data)
     current = NumericPreferencePairs(records, checkpoint['vocabulary'], args.phase)
     if not len(current): raise ValueError('No training preference pairs')
     previous_records = read_records(args.replay_data) if args.replay_data else []
-    if args.phase == 'physiological' and not previous_records: raise ValueError('Physiological alignment requires expert replay data')
-    if args.phase == 'professional' and previous_records: raise ValueError('Expert alignment does not use replay')
     contexts = {}
     for row in records+previous_records:
         identity = (row['split'], json.dumps(row['context'], sort_keys=True))
         for key in (row['state_id'], (row['context']['subject_id'], row['context']['origin'])):
             if key in contexts and contexts[key] != identity: raise ValueError('Replay context or split mismatch')
             contexts[key] = identity
-    previous = NumericPreferencePairs(previous_records, checkpoint['vocabulary'], 'professional')
+    previous = NumericPreferencePairs(previous_records, checkpoint['vocabulary'], None)
     data = ReplayPairs(current, [previous] if previous_records else [], fraction if previous_records else 0., args.seed)
-    if previous_records and not .2 <= data.replay_count/len(data) <= .3: raise ValueError('Too few current pairs to realize 20–30 percent replay; supply more pairs')
     signature = hashlib.sha256(json.dumps([records, previous_records], sort_keys=True).encode()).hexdigest()
     alignment = dict(beta=beta, replay_fraction=fraction if previous_records else 0., data_signature=signature, seed=args.seed)
     model.configure_phase(args.phase); model.eval()

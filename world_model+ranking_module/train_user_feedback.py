@@ -88,8 +88,7 @@ def main(argv=None):
         'context uses configured history/history_mask, metadata, subject_id and origin; actions use mode, diet (6 factors), '
         'exercise (3 factors), onset (2 offsets), and optional exercise_type, diet_text, exercise_text, diet_images. '
         'Training keeps one pair per user/selected prescription each epoch and weights it by 1/sqrt(selection count). '
-        'Replay uses the configured fraction, with at least one pair per prior stage (the fraction can be higher for small inputs). '
-        'Both prior-stage replay files require training pairs; physiological replay requires factual observation IDs. '
+        'Optional --replay-data supplies preference pairs sampled at the configured replay fraction. '
         '--observation-data contains factual observation_id, state_id, split, context, executed action, target and target_mask. '
         'Only measured glucose supervises the simulation head; unexecuted alternatives never supply targets. '
         'Use one user per run for a personal checkpoint. Resume requires the same data and settings, starts at the next epoch, '
@@ -99,8 +98,7 @@ def main(argv=None):
     source.add_argument('--resume')
     parser.add_argument('--data', required=True)
     parser.add_argument('--observation-data', required=True)
-    parser.add_argument('--expert-replay-data', required=True)
-    parser.add_argument('--physiological-replay-data', required=True)
+    parser.add_argument('--replay-data')
     parser.add_argument('--output', required=True)
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
@@ -126,9 +124,9 @@ def main(argv=None):
     measured_records = read_records(args.observation_data)
     subjects = {r['context']['subject_id'] for r in records + measured_records}
     if len(subjects) != 1: raise ValueError('Personal feedback and observations must belong to exactly one participant')
-    expert_records, physiological_records = read_records(args.expert_replay_data), read_records(args.physiological_replay_data)
+    replay_records = read_records(args.replay_data) if args.replay_data else []
     contexts = {}
-    for row in records + measured_records + expert_records + physiological_records:
+    for row in records + measured_records + replay_records:
         identity = (row['split'], json.dumps(row['context'], sort_keys=True, allow_nan=False))
         for key in (row['state_id'], (row['context']['subject_id'], row['context']['origin'])):
             if key in contexts and contexts[key] != identity: raise ValueError('Replay context or split mismatch')
@@ -139,18 +137,18 @@ def main(argv=None):
     if not observations['train']: raise ValueError('Simulation updates require training observations')
     current = NumericPreferencePairs(records, vocabulary, 'user_feedback')
     validation = NumericPreferencePairs(records, vocabulary, 'user_feedback', 'validation')
-    expert = NumericPreferencePairs(expert_records, vocabulary, 'professional')
-    physiological = NumericPreferencePairs(physiological_records, vocabulary, 'physiological')
-    if not len(current) or not len(expert) or not len(physiological): raise ValueError('Training requires feedback and both prior-stage replay datasets')
+    replay = NumericPreferencePairs(replay_records, vocabulary, None)
+    if not len(current): raise ValueError('Training requires feedback pairs')
     groups, selections = defaultdict(list), defaultdict(set)
     for index, row in enumerate(r for r in records if r['split'] == 'train'):
         key = (row['context']['subject_id'], row['preferred_id'])
         groups[key].append(index); selections[key].add(row['feedback_id'])
     for key, indices in groups.items():
         for index in indices: current.rows[index]['pair_weight'] /= math.sqrt(len(selections[key]))
-    feedback_settings = dict(beta=args.beta, learning_rate=args.learning_rate, replay_fraction=feedback['replay_fraction'], seed=args.seed, batch_size=args.batch_size,
+    fraction = float(feedback['replay_fraction']) if replay_records else 0.
+    feedback_settings = dict(beta=args.beta, learning_rate=args.learning_rate, replay_fraction=fraction, seed=args.seed, batch_size=args.batch_size,
         simulation_updates=True, participant_id=next(iter(subjects)), gradient_clip=feedback['gradient_clip'], optimizer=optimizer_settings(),
-        data_signature=hashlib.sha256(json.dumps([records, measured_records, expert_records, physiological_records], sort_keys=True, allow_nan=False).encode()).hexdigest())
+        data_signature=hashlib.sha256(json.dumps([records, measured_records, replay_records], sort_keys=True, allow_nan=False).encode()).hexdigest())
     previous = checkpoint.get('user_feedback', {})
     if args.resume and previous.get('settings') != feedback_settings: raise ValueError('Resume feedback data or settings differ')
     model = MetabolicWorldModel(**checkpoint['model_config'])
@@ -173,13 +171,8 @@ def main(argv=None):
     for epoch in range(start, start + args.epochs):
         rng = random.Random(args.seed + epoch)
         selected = [current[rng.choice(indices)] for indices in groups.values()]
-        fraction = feedback['replay_fraction']
-        if not 0 < fraction < 1: raise ValueError('Feedback replay fraction must be between zero and one')
-        replay_count = max(2, round(len(selected)*fraction/(1-fraction)))
-        old = [expert, physiological]
-        balanced_replay = [old[i % 2][rng.randrange(len(old[i % 2]))] for i in range(replay_count)]
-        data = ReplayPairs(selected, [balanced_replay], 0., args.seed)
-        data.indices.extend(('old', 0, i) for i in range(replay_count)); rng.shuffle(data.indices)
+        data = ReplayPairs(selected, [replay] if replay_records else [], fraction, args.seed)
+        data.set_epoch(epoch)
         total, count, replay_seen = 0., 0, Counter()
         prediction_total, observed_count = 0., 0
         pair_loader = DataLoader(data, batch_size=args.batch_size, collate_fn=list)

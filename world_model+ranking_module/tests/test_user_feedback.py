@@ -111,7 +111,7 @@ class FeedbackChecks(unittest.TestCase):
                 observed = self.observations + [dict(self.observations[0], observation_id='validation', state_id='validation',
                                                     split='validation', context=dict(self.context, origin='2026-10-31T08:00:00'))]
                 paths = {}
-                for name, records in dict(data=[feedback], expert_replay_data=[expert], physiological_replay_data=[physiological], observation_data=observed).items():
+                for name, records in dict(data=[feedback], replay_data=[expert, physiological], observation_data=observed).items():
                     paths[name] = self.directory/(name+'.json')
                     paths[name].write_text(json.dumps(records), encoding='utf-8')
                 args = ['--config', str(self.config_path), '--batch-size', '8', '--learning-rate', '0.001']
@@ -136,6 +136,14 @@ class FeedbackChecks(unittest.TestCase):
                 for key, value in full['model_state_dict'].items():
                     if isinstance(value, torch.Tensor): torch.testing.assert_close(value, resumed['model_state_dict'][key], rtol=0, atol=0)
                 self.assertEqual(full['user_feedback']['history'], resumed['user_feedback']['history'])
+                no_replay_args = list(args)
+                replay_index = no_replay_args.index('--replay-data')
+                del no_replay_args[replay_index:replay_index+2]
+                no_replay_output = self.directory/(readout+'-no-replay')
+                main(no_replay_args+['--init-checkpoint', str(parent), '--output', str(no_replay_output), '--epochs', '1'])
+                no_replay = torch.load(no_replay_output/'checkpoint.pt', weights_only=False)['user_feedback']
+                self.assertEqual(no_replay['history'][0]['pairs'], 1)
+                self.assertEqual(no_replay['history'][0]['replay_fraction'], 0.)
                 if readout == 'direct':
                     longer = observed + [dict(self.observations[0], observation_id='extra-'+str(i)) for i in range(2)]
                     paths['observation_data'].write_text(json.dumps(longer), encoding='utf-8')
@@ -144,7 +152,7 @@ class FeedbackChecks(unittest.TestCase):
                     unequal = torch.load(unequal_output/'checkpoint.pt', weights_only=False)['user_feedback']
                     self.assertEqual(unequal['global_step'], 5)
                     self.assertEqual(unequal['history'][0]['observations'], 5)
-                    self.assertEqual(unequal['history'][0]['pairs'], 3)
+                    self.assertEqual(unequal['history'][0]['pairs'], 1 + round(settings('user_feedback', 'replay_fraction') / (1 - settings('user_feedback', 'replay_fraction'))))
                     limited_output = self.directory/'limited'
                     main(args+['--init-checkpoint', str(parent), '--output', str(limited_output), '--epochs', '1', '--batch-size', '1', '--max-steps', '1'])
                     limited = torch.load(limited_output/'checkpoint.pt', weights_only=False)['user_feedback']

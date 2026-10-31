@@ -110,12 +110,12 @@ Pre-train the diet and exercise encoders separately using the Qwen2.5-VL-72B-Ins
 
 ```bash
 python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
-  --model Qwen/Qwen2.5-VL-7B-Instruct --domain diet \
+  --model Qwen/Qwen2.5-VL-72B-Instruct --domain diet \
   --data data/diet_annotations.json --output outputs/diet_encoder \
   --backend-id diet-sft-v1
 
 python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
-  --model Qwen/Qwen2.5-VL-7B-Instruct --domain exercise \
+  --model Qwen/Qwen2.5-VL-72B-Instruct --domain exercise \
   --data data/exercise_annotations.json --output outputs/exercise_encoder \
   --backend-id exercise-sft-v1
 ```
@@ -137,28 +137,29 @@ python 'world_model+ranking_module/train.py' --config config.json \
 
 **4. Multi-stage Alignment**
 
-Run health professional alignment, physiological response alignment and user feedback alignment in order:
+Set `ALIGNMENT_PHASE` to `professional` or `physiological` and manually update the checkpoint and output paths for each stage:
 
 ```bash
 python 'world_model+ranking_module/train.py' --config config.json \
   --phase ${ALIGNMENT_PHASE} --data data/${ALIGNMENT_PHASE}_pairs.json \
-  --init-checkpoint outputs/fusion/checkpoint.pt --output outputs/professional
-
-python 'world_model+ranking_module/train.py' --config config.json \
-  --phase physiological --data data/physiological_pairs.json \
-  --replay-data data/professional_pairs.json \
-  --init-checkpoint outputs/professional/checkpoint.pt --output outputs/physiological
-
-python 'world_model+ranking_module/train_user_feedback.py' --config config.json \
-  --data data/user_feedback.json --observation-data data/user_observations.json \
-  --expert-replay-data data/professional_pairs.json \
-  --physiological-replay-data data/physiological_pairs.json \
-  --init-checkpoint outputs/physiological/checkpoint.pt --output outputs/user
+  --replay-data data/replay_pairs.json \
+  --init-checkpoint outputs/fusion/checkpoint.pt --output outputs/${ALIGNMENT_PHASE}
 ```
 
-For physiological alignment, set `alignment.replay_fraction` between 0.2 and 0.3 and provide enough current pairs to realise that ratio. Each user feedback run uses feedback and measured observations from one participant.
+Optional `--replay-data` accepts one JSON or JSONL file containing replay pairs, including mixed stages. Set `alignment.replay_fraction` in the configuration. Omit `--replay-data` to train without replay.
 
-**5. Prescription Generation and Ranking**
+**5. Inference**
+
+Exercise:
+
+```bash
+python 'world_model+ranking_module/inference.py' --config config.json \
+  --data data/train.json --checkpoint outputs/user/checkpoint.pt \
+  --knowledge data/knowledge.json --mode exercise --ranking learned \
+  --top-k 3 --output outputs/exercise_recommendations.json
+```
+
+Diet:
 
 ```bash
 python 'world_model+ranking_module/inference.py' --config config.json \
@@ -167,11 +168,18 @@ python 'world_model+ranking_module/inference.py' --config config.json \
   --top-k 3 --output outputs/diet_recommendations.json
 ```
 
-Set `--mode exercise` or `--mode joint` for exercise or combined prescriptions. Use each script's `--help` for available arguments.
+Fusion (combined diet and exercise, using `--mode joint`):
+
+```bash
+python 'world_model+ranking_module/inference.py' --config config.json \
+  --data data/train.json --checkpoint outputs/user/checkpoint.pt \
+  --knowledge data/knowledge.json --mode joint --ranking learned \
+  --top-k 3 --output outputs/fusion_recommendations.json
+```
 
 ### Safety Module
 
-Configure the locally deployed DeepSeek-R1 model for the `safety` role in `config.json`. Safety review is included in the prescription inference pipeline.
+Safety review is included in the prescription inference pipeline.
 
 The role server normalizes clinical context and candidate actions into safety input schema v1: `schema_version`, `as_of`, `mode` and `facts`. Each fact contains `name`, `value`, `unit`, `source` and optional `observed_at`. Rules and semantic review use these same facts; accepted responses return them under `inputs`.
 
@@ -198,7 +206,7 @@ The external Unity project targets **XREAL AR** devices. It embeds the web UI wi
 - **Unity Hub modules**: Android Build Support (SDK / NDK / OpenJDK)
 - **Optional**: `adb` (usually not needed if you use Unity's Build & Run; needed for CLI install/debugging)
 
-The Python and Neo4j modules are separate from the Unity client. The external `XLIFE-AR.zip` archive contains the Unity project; `Assets/`, `Packages/` and `ProjectSettings/` are not included here.
+The external `XLIFE-AR.zip` archive contains the Unity project; `Assets/`, `Packages/` and `ProjectSettings/` are not included here.
 
 > Vuplex must be purchased and imported separately. The XREAL XR Plugin is included in the external archive.
 

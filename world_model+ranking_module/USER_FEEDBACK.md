@@ -18,8 +18,7 @@ python 'world_model+ranking_module/train_user_feedback.py' \
   --init-checkpoint outputs/physiological/checkpoint.pt \
   --data data/user_feedback.json \
   --observation-data data/user_observations.json \
-  --expert-replay-data data/professional_pairs.json \
-  --physiological-replay-data data/physiological_pairs.json \
+  --replay-data data/replay_pairs.json \
   --output outputs/personal
 ```
 
@@ -38,8 +37,8 @@ Keep future measurements outside `context` and `action`. Neither preferred nor
 rejected alternatives are treated as executed actions. Physiological replay
 observation IDs alone do not supply glucose targets. All feedback and observation
 rows must belong to one participant; prior-stage preference replay can include
-other participants. At least one training feedback pair, one training observation,
-and training pairs from both replay stages are required.
+other participants. At least one training feedback pair and one training observation
+are required. Optional `--replay-data` accepts a JSON or JSONL file containing preference pairs from any stages. Replay uses `user_feedback.replay_fraction` from configuration; omitting the file disables replay.
 
 Each epoch visits all factual training observations once, independently of
 feedback-pair subsampling and preference replay. Batches from both streams are

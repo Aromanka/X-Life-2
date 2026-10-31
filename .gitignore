@@ -7,8 +7,6 @@ __pycache__/
 venv/
 .env
 .env.*
-kg_agents/config.json
-configs/local.json
 logs/
 outputs/
 checkpoints/
@@ -17,11 +15,6 @@ checkpoints/
 *.safetensors
 models/
 data/
-kg_agents/data/
-kg_agents/output_history/
-kg_agents/tests/
-kg_agents/sample/
-kg_agents/kg/templates/
 .idea/
 .vscode/
 *.zip
