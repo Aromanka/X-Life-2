@@ -126,7 +126,7 @@ python 'world_model+ranking_module/train.py' --config config.json \
 
 **4. Multi-stage Alignment**
 
-Set `ALIGNMENT_PHASE` to `professional` or `physiological` and manually update the checkpoint and output paths for each stage:
+Set `ALIGNMENT_PHASE` to `professional` or `physiological`:
 
 ```bash
 python 'world_model+ranking_module/train.py' --config config.json \
@@ -225,8 +225,7 @@ After opening the project, Unity resolves dependencies from `Packages/manifest.j
 
 1. Open the scene: `Assets/Scenes/WebView.unity`
 2. Select `CanvasWebViewPrefab` in the scene hierarchy
-3. Set `InitialUrl` to your web URL
-   - Current example value: `https://xlife.chat/MainPage/AR`
+3. Set `InitialUrl` to your web URL: `https://xlife.chat/MainPage/AR`
 
 ##### 4.2 (Optional) Configure iFLYTEK Speech Recognition
 
@@ -282,7 +281,7 @@ Alternatively, you can create a ScriptableObject config in Unity Editor:
 
 <a name="minimum-dataset"></a>
 
-## 📊 minimum Dataset
+## 📊 minimum dataset
 
 The minimum dataset is available at [`./minimum_dataset/`](./minimum_dataset/). It contains three pseudonymous participants with:
 
