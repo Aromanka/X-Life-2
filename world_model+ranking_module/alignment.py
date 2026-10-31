@@ -12,7 +12,6 @@ from train_data import read_records, ReplayPairs
 from dataset_metadata import prepare_metadata
 from configuration import settings, optimizer_settings
 from world_model import ranking_probabilities, llm_actions_enabled
-from action_inputs import action_inputs
 
 
 MODES = ('diet', 'exercise', 'joint')
@@ -20,7 +19,7 @@ MODES = ('diet', 'exercise', 'joint')
 
 def candidate(context, action, vocabulary):
     if set(context) != {'history', 'history_mask', 'metadata', 'subject_id', 'origin'}: raise ValueError('Context requires history, history_mask, metadata, subject_id and origin only')
-    if set(action) - {'mode', 'diet', 'exercise', 'exercise_type', 'onset', 'diet_text', 'exercise_text', 'diet_images'}: raise ValueError('Candidates may contain actions only, never context or future labels')
+    if set(action) - {'mode', 'diet', 'exercise', 'exercise_type', 'intensity_scale', 'onset', 'diet_text', 'exercise_text', 'diet_images'}: raise ValueError('Candidates may contain actions only, never context or future labels')
     mode = action['mode']
     if mode not in MODES: raise ValueError('Unknown candidate mode')
     sample = {'history':torch.tensor([float('nan') if v is None else v for v in context['history']], dtype=torch.float32),
@@ -39,7 +38,8 @@ def candidate(context, action, vocabulary):
     sample['onset'] = torch.tensor(action['onset'], dtype=torch.float32)
     if sample['onset'].shape != (2,) or not torch.isfinite(sample['onset']).all(): raise ValueError('Two finite onset offsets are required')
     sample['type_id'] = torch.tensor(vocabulary.get(action.get('exercise_type', ''), 0))
-    sample.update(action_inputs(action))
+    sample.update({key:action.get(key, default) for key,default in (
+        ('diet_text',''), ('exercise_text',''), ('diet_images',[]), ('exercise_type',''), ('intensity_scale','unknown'))})
     return sample
 
 

@@ -15,7 +15,8 @@ def collate(rows, vocabulary):
     batch = {key: torch.stack([row[key] for row in rows]) for key in ('diet', 'exercise', 'onset', 'history', 'history_mask', 'target', 'target_mask')}
     batch['metadata'] = [row['metadata'] for row in rows]
     batch['type_id'] = torch.tensor([vocabulary.get(row['exercise_type'], 0) for row in rows])
-    for key in ('diet_text', 'exercise_text', 'subject_id', 'origin'): batch[key] = [row[key] for row in rows]
+    for key in ('diet_text', 'exercise_text', 'exercise_type', 'subject_id', 'origin'): batch[key] = [row[key] for row in rows]
+    batch['intensity_scale'] = [row.get('intensity_scale', 'unknown') for row in rows]
     batch['diet_images'] = [row.get('diet_images', []) for row in rows]
     if 'supervision' in rows[0]: batch['supervision'] = [row['supervision'] for row in rows]
     return batch

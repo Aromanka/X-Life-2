@@ -167,6 +167,7 @@ class MetabolicWorldModel(nn.Module):
             for i in range(len(history)):
                 action = {key:batch[key][i].detach().cpu().tolist() for key in ('diet', 'exercise', 'onset')}
                 action.update(mode=mode, diet_text=batch['diet_text'][i], exercise_text=batch['exercise_text'][i], diet_images=batch.get('diet_images', [[] for _ in history])[i])
+                action.update({key:batch[key][i] for key in ('exercise_type', 'intensity_scale') if key in batch})
                 inputs.append(action_inputs(action))
         states = {}
         for index, domain in enumerate(('diet', 'exercise')):
