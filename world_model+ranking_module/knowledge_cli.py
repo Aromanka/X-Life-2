@@ -9,19 +9,29 @@ from configuration import parse_configured
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--input',nargs='+',required=True);p.add_argument('--output',required=True)
+    p.add_argument('--input',nargs='+',required=True,metavar='DIRECTORY',
+                   help='Recursively extract PDF and UTF-8 TXT files from input directories')
+    p.add_argument('--output',required=True)
     p.add_argument('--backend-url');p.add_argument('--chunk-chars',type=int)
     args=parse_configured(p, argv, 'knowledge', ('chunk_chars',))
     if args.chunk_chars<1: p.error('Positive chunk size required')
-    backend=HTTPBackend(args.backend_url);triples={};provenance=[]
+    files=set()
     for name in args.input:
-        path=Path(name)
+        directory=Path(name)
+        if not directory.is_dir():
+            p.error(f'Input must be an existing directory: {directory}')
+        files.update(path.resolve() for path in directory.rglob('*')
+                     if path.is_file() and path.suffix.lower() in {'.pdf', '.txt'})
+    if not files:
+        p.error('No PDF or TXT files found in input directories')
+    backend=HTTPBackend(args.backend_url);triples={};provenance=[]
+    for path in sorted(files):
         if path.suffix.lower()=='.pdf':
             import pymupdf
             with pymupdf.open(path) as doc: text='\n'.join(page.get_text() for page in doc)
         else: text=path.read_text(encoding='utf-8')
         for offset in range(0,len(text),args.chunk_chars):
-            graph,source=extract(text[offset:offset+args.chunk_chars],f'{path.name}:chars:{offset}',backend)
+            graph,source=extract(text[offset:offset+args.chunk_chars],f'{path.as_posix()}:chars:{offset}',backend)
             provenance.append(source)
             for row in graph.triples:
                 key=tuple(normalize(row[k]) for k in ('head','relation','tail','source'))

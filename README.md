@@ -85,23 +85,13 @@ pip install -r requirements.txt
 
 This module generates diet and exercise prescriptions from a hybrid graph and vector knowledge base.
 
-Run all commands below from the repository root. Configure model paths, role endpoints and training parameters in `config.json`, and set `http.url` to the running role service.
-
-| Role | Model |
-| --- | --- |
-| Prescription generation and knowledge extraction | Qwen3-32B |
-| Clinical and physiological metadata encoding | Qwen3-32B |
-| Knowledge embeddings | Qwen3-Embedding-8B |
-| Diet and exercise action encoders | Fine-tuned Qwen2.5-VL-72B-Instruct |
-| Safety review | Locally deployed DeepSeek-R1 |
-
 #### Knowledge Graph Construction
 
-Prepare guideline PDFs or text files and extract the knowledge graph:
+Prepare guideline files and extract the knowledge graph:
 
 ```bash
 python 'world_model+ranking_module/knowledge_cli.py' --config config.json \
-  --input data/guidelines.pdf --output data/knowledge.json
+  --input data/guidelines --output data/knowledge.json
 ```
 
 ### Diet/Exercise Sub-world model and Ranking Module
@@ -116,16 +106,16 @@ Action-encoder training files contain `text`, optional `images`, `annotations` a
 
 **2. Action Encoder Pre-training**
 
-Pre-train the diet and exercise encoders separately using a local Qwen2.5-VL-72B-Instruct backbone:
+Pre-train the diet and exercise encoders separately using the Qwen2.5-VL-72B-Instruct backbone:
 
 ```bash
 python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
-  --model /path/to/local/Qwen2.5-VL-72B-Instruct --domain diet \
+  --model Qwen/Qwen2.5-VL-7B-Instruct --domain diet \
   --data data/diet_annotations.json --output outputs/diet_encoder \
   --backend-id diet-sft-v1
 
 python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
-  --model /path/to/local/Qwen2.5-VL-72B-Instruct --domain exercise \
+  --model Qwen/Qwen2.5-VL-7B-Instruct --domain exercise \
   --data data/exercise_annotations.json --output outputs/exercise_encoder \
   --backend-id exercise-sft-v1
 ```
@@ -151,7 +141,7 @@ Run health professional alignment, physiological response alignment and user fee
 
 ```bash
 python 'world_model+ranking_module/train.py' --config config.json \
-  --phase professional --data data/professional_pairs.json \
+  --phase ${ALIGNMENT_PHASE} --data data/${ALIGNMENT_PHASE}_pairs.json \
   --init-checkpoint outputs/fusion/checkpoint.pt --output outputs/professional
 
 python 'world_model+ranking_module/train.py' --config config.json \
