@@ -11,7 +11,7 @@ from unittest.mock import patch
 import torch
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(ROOT/'extra_code'), str(ROOT/'X-Life-2/world_model+ranking_module')]
+sys.path[:0] = [str(ROOT/'extra_code'), str(ROOT/'X-Life-2/src')]
 from services.data_processing import split_samples
 from train import main
 from world_model import MetabolicWorldModel

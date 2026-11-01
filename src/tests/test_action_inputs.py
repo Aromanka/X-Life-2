@@ -9,7 +9,7 @@ from unittest.mock import patch
 import torch
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(ROOT/'extra_code'), str(ROOT/'X-Life-2/world_model+ranking_module')]
+sys.path[:0] = [str(ROOT/'extra_code'), str(ROOT/'X-Life-2/src')]
 from action_inputs import action_inputs
 from alignment import candidate, batch_candidates
 from services.contracts import validate_candidate
