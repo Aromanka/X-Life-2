@@ -29,7 +29,7 @@ class TransitionAlignmentChecks(unittest.TestCase):
             for mode in ('diet', 'exercise', 'joint'): model.ar_decoders[mode] = EchoDecoder()
         return model
 
-    def test_single_current_state_and_joint_updated_state_readout(self):
+    def test_all_branches_current_state_readout(self):
         for readout in ('direct', 'autoregressive'):
             model = self.model(readout, echo=True)
             with torch.no_grad():
@@ -41,7 +41,7 @@ class TransitionAlignmentChecks(unittest.TestCase):
                         exercise = torch.tensor([[5., 6., 7., 8.]])
                         initial = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
                         current = torch.stack([initial*2**i for i in range(horizon)], 1)
-                        expected = current*2 if mode == 'joint' else current
+                        expected = current
                         transition = model.fusion if mode == 'joint' else getattr(model, mode)
                         with patch.object(model, 'initial_states', return_value=(diet, exercise, torch.tensor([5.]))), \
                              patch.object(model.diet, 'increment', side_effect=lambda s:s) as diet_step, \
@@ -64,7 +64,7 @@ class TransitionAlignmentChecks(unittest.TestCase):
                                 torch.testing.assert_close(diet_step.call_args_list[i].args[0], current[:, i, :4])
                                 torch.testing.assert_close(exercise_step.call_args_list[i].args[0], current[:, i, 4:])
 
-    def test_first_joint_output_depends_on_current_transition(self):
+    def test_first_output_is_independent_of_current_transition(self):
         for readout in ('direct', 'autoregressive'):
             model = self.model(readout)
             for mode in ('diet', 'exercise', 'joint'):
@@ -76,12 +76,8 @@ class TransitionAlignmentChecks(unittest.TestCase):
                         transition = model.fusion if mode == 'joint' else getattr(model, mode)
                         with patch.object(transition, 'increment', side_effect=lambda s:torch.arange(s.size(-1), dtype=s.dtype).expand_as(s)):
                             changed = model({}, mode, horizon=3)
-                    if mode == 'joint':
-                        self.assertFalse(torch.allclose(baseline['trajectory'][:, 0], changed['trajectory'][:, 0]))
-                        self.assertFalse(torch.allclose(baseline['predicted_cgm'][:, 0], changed['predicted_cgm'][:, 0]))
-                    else:
-                        torch.testing.assert_close(baseline['trajectory'][:, 0], changed['trajectory'][:, 0])
-                        torch.testing.assert_close(baseline['predicted_cgm'][:, 0], changed['predicted_cgm'][:, 0])
+                    torch.testing.assert_close(baseline['trajectory'][:, 0], changed['trajectory'][:, 0])
+                    torch.testing.assert_close(baseline['predicted_cgm'][:, 0], changed['predicted_cgm'][:, 0])
                     self.assertFalse(torch.allclose(baseline['trajectory'][:, 1:], changed['trajectory'][:, 1:]))
 
     def test_single_readout_uses_basis_and_joint_readout_uses_full_state(self):

@@ -224,15 +224,14 @@ class MetabolicWorldModel(nn.Module):
         state = torch.cat([diet, exercise], -1) if mode == 'joint' else diet if mode == 'diet' else exercise
         states, gates = [], []
         for _ in range(horizon):
+            states.append(state)
             if mode == 'joint':
                 d, e = state.split(self.dimension, -1)
                 weights = torch.sigmoid(self.gate(state @ self.fusion.basis.T))
                 dm, em = self.diet.increment(d), self.exercise.increment(e)
                 state = state + torch.cat([weights[:, :1]*dm, weights[:, 1:2]*em], -1) + weights[:, 2:3]*self.fusion.increment(state)
                 gates.append(weights)
-                states.append(state)
             else:
-                states.append(state)
                 state = state + getattr(self, mode).increment(state)
         states = torch.stack(states, 1)
         q, glucose = (self.fusion if mode == 'joint' else getattr(self, mode)).readout(states)
