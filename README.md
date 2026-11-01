@@ -79,7 +79,7 @@ This module generates diet and exercise prescriptions from a hybrid graph and ve
 Prepare guideline files and extract the knowledge graph:
 
 ```bash
-python 'world_model+ranking_module/knowledge_cli.py' --config config.json \
+python src/knowledge_cli.py --config config.json \
   --input data/guidelines --output data/knowledge.json
 ```
 
@@ -98,12 +98,12 @@ Action-encoder training files contain `text`, optional `images`, `annotations` a
 Pre-train the diet and exercise encoders separately using the Qwen2.5-VL-72B-Instruct backbone:
 
 ```bash
-python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
+python src/train_action_encoder.py --config config.json \
   --model Qwen/Qwen2.5-VL-72B-Instruct --domain diet \
   --data data/diet_annotations.json --output outputs/diet_encoder \
   --backend-id diet-sft
 
-python 'world_model+ranking_module/train_action_encoder.py' --config config.json \
+python src/train_action_encoder.py --config config.json \
   --model Qwen/Qwen2.5-VL-72B-Instruct --domain exercise \
   --data data/exercise_annotations.json --output outputs/exercise_encoder \
   --backend-id exercise-sft
@@ -116,10 +116,10 @@ Configure the role service to use these saved encoders, and set `model.action_ba
 Train both sub-world models, then train their fusion module:
 
 ```bash
-python 'world_model+ranking_module/train.py' --config config.json \
+python src/train. --config config.json \
   --phase single --domain both --data data/train.json --output outputs/single
 
-python 'world_model+ranking_module/train.py' --config config.json \
+python src/train.py --config config.json \
   --phase fusion --data data/train.json \
   --init-checkpoint outputs/single/checkpoint.pt --output outputs/fusion
 ```
@@ -129,7 +129,7 @@ python 'world_model+ranking_module/train.py' --config config.json \
 Set `ALIGNMENT_PHASE` to `professional` or `physiological`:
 
 ```bash
-python 'world_model+ranking_module/train.py' --config config.json \
+python src/train.py --config config.json \
   --phase ${ALIGNMENT_PHASE} --data data/${ALIGNMENT_PHASE}_pairs.json \
   --replay-data data/replay_pairs.json \
   --init-checkpoint outputs/fusion/checkpoint.pt --output outputs/${ALIGNMENT_PHASE}
@@ -142,7 +142,7 @@ Optional `--replay-data` accepts one JSON or JSONL file containing replay pairs,
 Exercise only:
 
 ```bash
-python 'world_model+ranking_module/inference.py' --config config.json \
+python src/inference.py --config config.json \
   --data data/train.json --checkpoint outputs/${ALIGNMENT_PHASE}/checkpoint.pt \
   --knowledge data/knowledge.json --mode exercise --ranking learned \
   --top-k 3 --output outputs/exercise_recommendations.json
@@ -151,7 +151,7 @@ python 'world_model+ranking_module/inference.py' --config config.json \
 Diet only:
 
 ```bash
-python 'world_model+ranking_module/inference.py' --config config.json \
+python src/inference.py --config config.json \
   --data data/train.json --checkpoint outputs/${ALIGNMENT_PHASE}/checkpoint.pt \
   --knowledge data/knowledge.json --mode diet --ranking learned \
   --top-k 3 --output outputs/diet_recommendations.json
@@ -160,7 +160,7 @@ python 'world_model+ranking_module/inference.py' --config config.json \
 Combined diet and exercise:
 
 ```bash
-python 'world_model+ranking_module/inference.py' --config config.json \
+python src/inference.py --config config.json \
   --data data/train.json --checkpoint outputs/${ALIGNMENT_PHASE}/checkpoint.pt \
   --knowledge data/knowledge.json --mode joint --ranking learned \
   --top-k 3 --output outputs/fusion_recommendations.json
